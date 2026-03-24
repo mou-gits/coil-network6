@@ -1,41 +1,71 @@
-# Prerequisites
-*.d
+## Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+ARM/
+ARM64/
+[Bb]uild/
+[Bb]in/
+[Oo]bj/
 
-# Compiled Object files
-*.slo
-*.lo
-*.o
+## Visual Studio cache and user-specific files
+.vs/
+*.VC.db
+*.VC.opendb
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+## Compiled object files
 *.obj
+*.o
+*.lo
+*.slo
 
-# Precompiled Headers
-*.gch
-*.pch
-
-# Linker files
-*.ilk
-
-# Debugger Files
-*.pdb
-
-# Compiled Dynamic libraries
+## Compiled libraries
+*.lib
+*.a
+*.la
+*.lo
+*.dll
 *.so
 *.dylib
-*.dll
 
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
-*.lai
-*.la
-*.a
-*.lib
-
-# Executables
+## Compiled executables
 *.exe
 *.out
 *.app
 
-# debug information files
-*.dwo
+## Precompiled headers
+*.pch
+*.gch
+*.ipch
+
+## Logs and temporary files
+*.log
+*.tlog
+*.tmp
+*.temp
+
+## CMake (if you use it)
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+build/
+
+## NuGet
+*.nupkg
+packages/
+*.snupkg
+
+## Other VS-generated files
+*.pdb
+*.idb
+*.ipdb
+*.iobj
+
+## Crash dumps
+*.dmp
