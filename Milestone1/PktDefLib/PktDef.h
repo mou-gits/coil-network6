@@ -1,5 +1,7 @@
 #pragma once
 
+#define ALL_RIGHT_BITS 0x00FF
+
 // ===============================
 // CONSTANTS (from assignment)
 // ===============================
@@ -88,11 +90,11 @@ public:
     // GET FUNCTIONS
     // ===========================
 
-    CmdType GetCmd();
-    bool GetAck();
-    int GetLength();
-    char* GetBodyData();
-    int GetPktCount();
+    int GetPktCount() const;
+    int GetLength() const;
+    char* GetBodyData() const;
+    bool GetAck() const;
+    CmdType GetCmd() const;
    
     // ===========================
     // CRC FUNCTIONS
