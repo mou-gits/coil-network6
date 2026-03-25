@@ -58,7 +58,7 @@ void PktDef::SetPktCount(int count)
 }
 
 // Get packet count
-int PktDef::GetPktCount()
+int PktDef::GetPktCount() const
 {
     return packet.header.PktCount;
 }
@@ -118,7 +118,7 @@ void PktDef::SetBodyData(char* data, int size)
     packet.header.Length = HEADERSIZE + bodySize + 1;   
 }
 
-CmdType PktDef::GetCmd()
+CmdType PktDef::GetCmd() const
 {
     if ((packet.header.Flags & DRIVE_MASK) != 0)
     {
@@ -215,17 +215,17 @@ char* PktDef::GenPacket()
     return RawBuffer;
 }
 
-int PktDef::GetLength()
+int PktDef::GetLength() const
 {
     return packet.header.Length;
 }
 
-char* PktDef::GetBodyData()
+char* PktDef::GetBodyData() const
 {
     return packet.Data;
 }
 
-bool PktDef::GetAck()
+bool PktDef::GetAck() const
 {
     return (packet.header.Flags & ACK_MASK) != 0;
 }
