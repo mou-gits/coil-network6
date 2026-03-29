@@ -1,230 +1,231 @@
 #pragma once
+#include <cstddef>
 
-#define ALL_RIGHT_BITS 0x00FF
+// ---------------------------------------------------------
+//  Protocol constants
+// ---------------------------------------------------------
 
-// Flag bit masks
-#define DRIVE_MASK   0x80   // bit 7
-#define STATUS_MASK  0x40   // bit 6
-#define SLEEP_MASK   0x20   // bit 5
-#define ACK_MASK     0x10   // bit 4
+// HEADERSIZE: size of Header in bytes (must be calculated by hand)
+// Header = PktCount(2) + Flags(1) + Length(1) = 4 bytes
+static const int HEADERSIZE = 4;
 
-// Lower 4 bits are padding and must be zero
-#define PADDING_MASK 0x0F
+// Telemetry ACK rule:
+// If true, telemetry responses must have ACK = 0.
+// If false, ACK is ignored for telemetry.
+static const bool ENFORCE_TELEMETRY_ACK_ZERO = false;
 
+// ---------------------------------------------------------
+//  Direction constants (spec requires integer definitions)
+// ---------------------------------------------------------
+enum Direction : unsigned char {
+    FORWARD = 1,
+    BACKWARD = 2,
+    RIGHT = 3,
+    LEFT = 4
+};
 
-// ===============================
-// CONSTANTS (from assignment)
-// ===============================
-
-const int FORWARD = 1;
-const int BACKWARD = 2;
-const int RIGHT = 3;
-const int LEFT = 4;
-
-// Header size: PktCount (2 bytes) + Flags (1 byte) + Length (1 byte)
-const int HEADERSIZE = 4;
-
-
-// ===============================
-// ENUM FOR COMMAND TYPE
-// ===============================
-enum CmdType
-{
+// ---------------------------------------------------------
+//  Command type (spec requires DRIVE, SLEEP, RESPONSE)
+// ---------------------------------------------------------
+enum CmdType {
     DRIVE,
     SLEEP,
     RESPONSE
 };
 
-
-
-// ===============================
-// STRUCTURES
-// ===============================
-
-// Header structure (logical representation)
-struct Header
-{
-    unsigned short PktCount;   // 2 bytes
-
-    // Instead of storing flags separately,
-    // we will store them in ONE byte using bit manipulation
-    unsigned char Flags;       // 1 byte (Drive, Status, Sleep, Ack, padding)
-
-    unsigned char Length;      // 1 byte (total packet length)
+// ---------------------------------------------------------
+//  Header (spec requires this exact structure)
+// ---------------------------------------------------------
+struct Header {
+    unsigned short PktCount;
+    unsigned char  Flags;
+    unsigned char  Length;
 };
 
+// ---------------------------------------------------------
+//  Flag interpretation helper
+// ---------------------------------------------------------
+struct FlagBits {
+    unsigned char Drive : 1;
+    unsigned char Status : 1;
+    unsigned char Sleep : 1;
+    unsigned char Ack : 1;
+    unsigned char Pad : 4;
+};
 
-// Drive body (forward/backward)
-struct DriveBody
-{
+union FlagUnion {
+    unsigned char byte;
+    FlagBits bits;
+};
+
+// ---------------------------------------------------------
+//  Fixed-size body structures
+// ---------------------------------------------------------
+struct DriveBody {
     unsigned char Direction;
     unsigned char Duration;
     unsigned char Power;
 };
 
-
-// Turn body (left/right)
-struct TurnBody
-{
+struct TurnBody {
     unsigned char Direction;
     unsigned short Duration;
 };
 
-struct TelemetryBody
-{
+struct TelemetryBody {
     unsigned short LastPktCounter;
     unsigned short CurrentGrade;
     unsigned short HitCount;
     unsigned short Heading;
-    unsigned char LastCmd;
-    unsigned char LastCmdValue;
-    unsigned char LastCmdPower;
+    unsigned char  LastCmd;
+    unsigned char  LastCmdValue;
+    unsigned char  LastCmdPower;
 };
 
+// ---------------------------------------------------------
+//  Body type selector
+// ---------------------------------------------------------
+enum BodyType {
+    NONE,
+    DRIVE_BODY,
+    TURN_BODY,
+    TELEMETRY_BODY,
+    MESSAGE_BODY
+};
 
-// ===============================
-// MAIN CLASS
-// ===============================
+// ---------------------------------------------------------
+//  Union for fixed-size bodies
+// ---------------------------------------------------------
+union BodyUnion {
+    DriveBody     drive;
+    TurnBody      turn;
+    TelemetryBody telemetry;
+};
 
 class PktDef
 {
 public:
+    // ---------------------------------------------------------
+    //  Required constructors
+    // ---------------------------------------------------------
 
-    bool IsValid() const;             // marks packet validity after parsing
+    // Default constructor:
+    // "places the PktDef object in a safe state":
+    // - Header fields = 0
+    // - Data pointer = nullptr
+    // - CRC = 0
+    PktDef();
 
-    // ===========================
-    // CONSTRUCTORS / DESTRUCTOR
-    // ===========================
+    // Overloaded constructor:
+    // "takes a RAW data buffer, parses the data and populates
+    //  the Header, Body, and CRC contents of the PktDef object."
+    PktDef(char* raw);
 
-    PktDef();                  // default constructor
-    PktDef(char* rawData);     // construct from raw packet
-    ~PktDef();                 // destructor (important for memory cleanup)
+    ~PktDef();
 
+    // ---------------------------------------------------------
+    //  Required setters
+    // ---------------------------------------------------------
 
-    // ===========================
-    // SET FUNCTIONS
-    // ===========================
-
+    // SetCmd:
+    // "sets the packet's command flag based on the CmdType"
     void SetCmd(CmdType cmd);
-    void SetBodyData(char* data, int size);
-    void SetPktCount(int count);
-    void SetAck(bool enable);
-    void SetStatus(bool enable);
 
+    // SetBodyData:
+    // "allocates the packet's Body field and copies the provided
+    //  RAW data buffer into the object's buffer"
+    void SetBodyData(char* data, int size);
+
+    // SetPktCount:
+    // "sets the object's PktCount header variable"
+    void SetPktCount(int count);
+
+    void SetStatus(bool enable);
     void SetDriveBody(const DriveBody& body);
     void SetTurnBody(const TurnBody& body);
+    void SetAck(bool enable);
 
+    // ---------------------------------------------------------
+    //  Required getters
+    // ---------------------------------------------------------
 
-    // ===========================
-    // GET FUNCTIONS
-    // ===========================
-
-    int GetPktCount() const;
-    int GetLength() const;
-    char* GetBodyData() const;
-    bool GetAck() const;
+    // GetCmd:
+    // "returns the CmdType based on the set command flag bit"
     CmdType GetCmd() const;
 
-    DriveBody GetDriveBody() const;
-    TurnBody GetTurnBody() const;
-    TelemetryBody GetTelemetry() const;
+    // GetAck:
+    // "returns True/False based on the Ack flag in the header"
+    bool GetAck() const;
 
-    char* GetRawBuffer() const;
+    // GetLength:
+    // "returns the packet Length in bytes"
+    int GetLength() const;
+
+    // GetBodyData:
+    // "returns a pointer to the object's Body field"
+    char* GetBodyData() const;
+
+    // GetPktCount:
+    // "returns the PktCount value"
+    int GetPktCount() const;
 
     unsigned char GetFlags() const;
     int GetBodySize() const;
+    DriveBody GetDriveBody() const;
+    TurnBody GetTurnBody() const;
+    TelemetryBody GetTelemetry() const;
+    char* GetRawBuffer() const;
 
-    // ===========================
-    // CRC FUNCTIONS
-    // ===========================
+    // ---------------------------------------------------------
+    //  Required CRC functions
+    // ---------------------------------------------------------
 
+    // CheckCRC:
+    // "takes a RAW buffer and size, calculates CRC, and returns
+    //  TRUE if it matches the packet's CRC, otherwise FALSE"
     bool CheckCRC(char* buffer, int size);
+
+    // CalcCRC:
+    // "calculates the CRC and sets the object's packet CRC"
     void CalcCRC();
 
+    // ---------------------------------------------------------
+    //  Required serialization
+    // ---------------------------------------------------------
 
-    // ===========================
-    // PACKET GENERATION
-    // ===========================
-
+    // GenPacket:
+    // "allocates RawBuffer and transfers the object's member
+    //  variables into a RAW data packet; returns RawBuffer"
     char* GenPacket();
 
-    /*
-    -------------------------------------------------------------------------
-    Protocol Architecture Note – Telemetry vs. ACK Interpretation
-    -------------------------------------------------------------------------
-
-    The robot protocol defines three distinct situations involving the Status
-    bit, but the specification is ambiguous about the ACK bit in one of them.
-    To avoid misinterpretation and ensure deterministic packet validation,
-    this class explicitly separates the three cases:
-
-        Situation #1 – Telemetry Request (Computer ? Robot)
-            A STATUS command sent by the computer to request housekeeping
-            telemetry. This is a command packet and therefore MUST NOT set
-            the ACK bit. If ACK = 1, the robot will reject the command.
-
-        Situation #2 – Acknowledgement Response (Robot ? Computer)
-            After receiving a valid command (Drive, Sleep, or Status), the
-            robot sends an ACK packet with both Status = 1 and Ack = 1.
-            This packet confirms receipt of the command but does not contain
-            telemetry data.
-
-        Situation #3 – Telemetry Response (Robot ? Computer)
-            The robot sends a second packet containing the actual telemetry
-            data. The protocol explicitly states that Status = 1 must be set,
-            but it does NOT specify whether Ack must be 0 or 1. To resolve
-            this ambiguity, this implementation introduces a compile-time
-            constant (ENFORCE_TELEMETRY_ACK_ZERO). When enabled, telemetry
-            responses are required to have Ack = 0; when disabled, the ACK
-            bit is ignored for telemetry packets.
-
-    This separation ensures:
-        - Commands are validated strictly according to protocol rules.
-        - ACK responses are unambiguously identified.
-        - Telemetry responses can be validated in either strict or relaxed
-          mode depending on project requirements or instructor expectations.
-
-    These rules are enforced by:
-        IsTelemetryRequest()   – validates Situation #1
-        IsAckResponse()        – validates Situation #2
-        IsTelemetryResponse()  – validates Situation #3 (with ACK policy)
-
-    -------------------------------------------------------------------------
-*/
-    bool IsTelemetryResponse() const;
-    bool IsAckResponse() const;
-    bool IsTelemetryRequest() const;
-
-private:
-    // If true : Telemetry responses MUST have ACK = 0
-    // If false: ACK is ignored for telemetry responses
-    static const bool ENFORCE_TELEMETRY_ACK_ZERO = true;
-
-    bool validPacket = true;
+    // ---------------------------------------------------------
+    //  VALIDATORS 
+    // ---------------------------------------------------------
+    bool IsValidDirection(Direction dir) const;
+    bool IsValid() const;
     bool IsDriveCommand() const;
     bool IsTurnCommand() const;
-    void ClearBody();                 // clears Data and resets bodySize
-    bool IsValidDirection(unsigned char dir) const;
+    bool IsTelemetryRequest() const;
+    bool IsAckResponse() const;
+    bool IsTelemetryResponse() const;
 
-    // ===========================
-    // INTERNAL PACKET STRUCTURE
-    // ===========================
+private:
+    // ---------------------------------------------------------
+    //  CmdPacket (spec requires this struct)
+    // ---------------------------------------------------------
+        struct CmdPacket {
+            Header    header;
+            BodyType  bodyType;
+            BodyUnion body;
+            char* Data;      // variable-length body (message)
+            int       dataSize;
+            char      CRC;
+        };
+    CmdPacket packet;
+    char* RawBuffer;
 
-    struct CmdPacket
-    {
-        Header header;   // header info
-        char* Data;      // dynamic body
-        char CRC;        // 1 byte CRC
-    };
+    void ClearBody();
 
-
-    // ===========================
-    // PRIVATE DATA MEMBERS
-    // ===========================
-
-    CmdPacket packet;    // main structured packet
-
-    char* RawBuffer;     // serialized packet (ready to send)
-
-    int bodySize;        // size of body (important for length calculation)
+    bool validPacket;
+    int  bodySize;
 };
