@@ -28,7 +28,6 @@ const int HEADERSIZE = 4;
 // ===============================
 // ENUM FOR COMMAND TYPE
 // ===============================
-
 enum CmdType
 {
     DRIVE,
