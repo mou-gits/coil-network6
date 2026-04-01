@@ -23,9 +23,15 @@ inline unsigned char BYTE(uint16_t x, int n)
 // Special functions
 bool PktDef::LooksLikeDriveBody() const
 {
-    if (bodySize != sizeof(DriveBody)) return false;
+    if (bodySize != sizeof(DriveBody))
+        return false;
 
-    const DriveBody* d = reinterpret_cast<const DriveBody*>(packet.Data);
+    const DriveBody* d = nullptr;
+
+    if (packet.Data != nullptr)
+        d = reinterpret_cast<const DriveBody*>(packet.Data);   // incoming
+    else
+        d = &packet.body.drive;                                // outgoing
 
     bool validDirection = (d->Direction >= 1 && d->Direction <= 4);
     bool validPower = (d->Power >= 80 && d->Power <= 100);
@@ -33,28 +39,45 @@ bool PktDef::LooksLikeDriveBody() const
     return validDirection && validPower;
 }
 
+
+
+
 bool PktDef::LooksLikeTurnBody() const
 {
-    if (bodySize != sizeof(TurnBody)) return false;
+    if (bodySize != sizeof(TurnBody))
+        return false;
 
-    const TurnBody* t = reinterpret_cast<const TurnBody*>(packet.Data);
+    const TurnBody* t = nullptr;
+
+    if (packet.Data != nullptr)
+        t = reinterpret_cast<const TurnBody*>(packet.Data);   // incoming
+    else
+        t = &packet.body.turn;                                // outgoing
 
     bool validTurnDir = (t->Direction == LEFT || t->Direction == RIGHT);
 
     return validTurnDir;
 }
 
+
 bool PktDef::LooksLikeTelemetryBody() const
 {
-    if (bodySize != sizeof(TelemetryBody)) return false;
+    if (bodySize != sizeof(TelemetryBody))
+        return false;
 
-    const TelemetryBody* t = reinterpret_cast<const TelemetryBody*>(packet.Data);
+    const TelemetryBody* t = nullptr;
+
+    if (packet.Data != nullptr)
+        t = reinterpret_cast<const TelemetryBody*>(packet.Data);   // incoming
+    else
+        t = &packet.body.telemetry;                                // outgoing
 
     if (t->Heading > 359) return false;
     if (t->LastCmdPower > 100) return false;
 
     return true;
 }
+
 
 
 // Constructors and Destructors
