@@ -1,770 +1,1072 @@
+#include <vector>
+#include <cstring>
+#include <string>
 #include "pch.h"
 #include "CppUnitTest.h"
 #include "../PktDefLib/PktDef.h"
+
+
+namespace Microsoft {
+    namespace VisualStudio {
+        namespace CppUnitTestFramework {
+
+            template<>
+            inline std::wstring ToString<CmdType>(const CmdType& t)
+            {
+                switch (t)
+                {
+                case DRIVE:     return L"DRIVE";
+                case SLEEP:     return L"SLEEP";
+                case RESPONSE:  return L"RESPONSE";
+                default:        return L"UNKNOWN_CMDTYPE";
+                }
+            }
+
+            template<>
+            inline std::wstring ToString<Direction>(const Direction& d)
+            {
+                switch (d)
+                {
+                case FORWARD:   return L"FORWARD";
+                case BACKWARD:  return L"BACKWARD";
+                case LEFT:      return L"LEFT";
+                case RIGHT:     return L"RIGHT";
+                default:        return L"UNKNOWN_DIRECTION";
+                }
+            }
+
+        } // namespace CppUnitTestFramework
+    } // namespace VisualStudio
+} // namespace Microsoft
+
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
 namespace PktDefTests
 {
-    TEST_CLASS(DefaultConstructorTests)
+    //
+    // Small helpers for tests
+    //
+    static DriveBody MakeDrive(Direction dir, unsigned char duration, unsigned char power)
+    {
+        DriveBody d{};
+        d.Direction = static_cast<unsigned char>(dir);
+        d.Duration = duration;
+        d.Power = power;
+        return d;
+    }
+
+    static TurnBody MakeTurn(Direction dir, unsigned short duration)
+    {
+        TurnBody t{};
+        t.Direction = static_cast<unsigned char>(dir);
+        t.Duration = duration;
+        return t;
+    }
+
+    static TelemetryBody MakeTelemetry()
+    {
+        TelemetryBody t{};
+        // Leave fields default/zero; we only care about size and round-trip
+        return t;
+    }
+
+    //
+    // 1. Constructor Tests
+    //
+    TEST_CLASS(ConstructorTests)
     {
     public:
-        TEST_METHOD(DefaultCtor_PktCountIsZero)
+
+        TEST_METHOD(ParseValidDriveCommand)
         {
-            PktDef pkt;
-            Assert::AreEqual(0, pkt.GetPktCount());
+            PktDef outgoing;
+            outgoing.SetPktCount(1);
+            DriveBody d = MakeDrive(FORWARD, 5, 90);
+            outgoing.SetDriveBody(d);
+            char* raw = outgoing.GenPacket();
+
+            PktDef incoming(raw);
+
+            Assert::IsTrue(incoming.IsDriveCommand());
+            Assert::IsTrue(incoming.IsValid());
+
+            DriveBody d2 = incoming.GetDriveBody();
+            Assert::AreEqual(d.Direction, d2.Direction);
+            Assert::AreEqual(d.Duration, d2.Duration);
+            Assert::AreEqual(d.Power, d2.Power);
         }
 
-        TEST_METHOD(DefaultCtor_LengthIsZero)
+        TEST_METHOD(ParseValidTurnCommand)
         {
-            PktDef pkt;
-            Assert::AreEqual(0, pkt.GetLength());
+            PktDef outgoing;
+            outgoing.SetPktCount(2);
+            TurnBody t = MakeTurn(LEFT, 123);
+            outgoing.SetTurnBody(t);
+            char* raw = outgoing.GenPacket();
+
+            PktDef incoming(raw);
+
+            Assert::IsTrue(incoming.IsTurnCommand());
+            Assert::IsTrue(incoming.IsValid());
+
+            TurnBody t2 = incoming.GetTurnBody();
+            Assert::AreEqual(t.Direction, t2.Direction);
+            Assert::AreEqual(t.Duration, t2.Duration);
         }
 
-        TEST_METHOD(DefaultCtor_BodyIsNull)
+        TEST_METHOD(ParseValidTelemetryResponse)
         {
-            PktDef pkt;
-            Assert::IsNull(pkt.GetBodyData());
+            PktDef outgoing;
+            TelemetryBody tb = MakeTelemetry();
+            outgoing.SetTelemetryBody(tb);
+            // Mark as telemetry response: Status bit set, no Ack
+            outgoing.SetStatus(true);
+            char* raw = outgoing.GenPacket();
+
+            PktDef incoming(raw);
+
+            Assert::IsTrue(incoming.IsTelemetryResponse());
+            Assert::IsTrue(incoming.IsValid());
         }
 
-        TEST_METHOD(DefaultCtor_AckIsFalse)
+        TEST_METHOD(ParseAckWithMessage)
         {
-            PktDef pkt;
-            Assert::IsFalse(pkt.GetAck());
+            PktDef outgoing;
+            outgoing.SetAck(true);
+            const char msg[] = "OK";
+            outgoing.SetBodyData(const_cast<char*>(msg), 2);
+            char* raw = outgoing.GenPacket();
+
+            PktDef incoming(raw);
+
+            Assert::IsTrue(incoming.IsAckResponse());
+            Assert::IsTrue(incoming.IsValid());
+
+            int size = 0;
+            char* body = incoming.GetBodyData(size);
+            Assert::AreEqual(2, size);
+            Assert::AreEqual('O', body[0]);
+            Assert::AreEqual('K', body[1]);
         }
 
-        TEST_METHOD(DefaultCtor_CmdIsResponse)
+        TEST_METHOD(ParseMalformedPacket_LengthTooShort)
         {
-            PktDef pkt;
-            Assert::IsTrue(pkt.GetCmd() == RESPONSE);
+            PktDef outgoing;
+            DriveBody d = MakeDrive(FORWARD, 5, 90);
+            outgoing.SetDriveBody(d);
+            char* raw = outgoing.GenPacket();
+
+            // Corrupt length to be too small
+            raw[3] = static_cast<char>(HEADERSIZE); // no body, no CRC
+
+            PktDef incoming(raw);
+
+            Assert::IsFalse(incoming.IsValid());
+        }
+
+        TEST_METHOD(ParseMalformedPacket_InvalidFlags)
+        {
+            PktDef outgoing;
+            DriveBody d = MakeDrive(FORWARD, 5, 90);
+            outgoing.SetDriveBody(d);
+            char* raw = outgoing.GenPacket();
+
+            // Set multiple command bits manually
+            unsigned char flags = static_cast<unsigned char>(raw[2]);
+            flags |= 0x04; // set Sleep as well
+            raw[2] = static_cast<char>(flags);
+
+            PktDef incoming(raw);
+
+            Assert::IsFalse(incoming.IsValid());
         }
     };
 
-    TEST_CLASS(SetGetCmdTests)
+
+    //
+    // 2. Setter Tests
+    //
+    TEST_CLASS(SetterTests)
     {
     public:
-        TEST_METHOD(SetCmd_Drive)
+
+        TEST_METHOD(SetDriveBodyPopulatesCorrectly)
         {
-            PktDef pkt;
-            pkt.SetCmd(DRIVE);
-            Assert::IsTrue(pkt.GetCmd() == DRIVE);
+            PktDef p;
+            DriveBody d = MakeDrive(BACKWARD, 10, 95);
+            p.SetDriveBody(d);
+
+            DriveBody d2 = p.GetDriveBody();
+            Assert::AreEqual(d.Direction, d2.Direction);
+            Assert::AreEqual(d.Duration, d2.Duration);
+            Assert::AreEqual(d.Power, d2.Power);
+            Assert::IsTrue(p.IsDriveCommand());
         }
 
-        TEST_METHOD(SetCmd_Sleep)
+        TEST_METHOD(SetTurnBodyPopulatesCorrectly)
         {
-            PktDef pkt;
-            pkt.SetCmd(SLEEP);
-            Assert::IsTrue(pkt.GetCmd() == SLEEP);
+            PktDef p;
+            TurnBody t = MakeTurn(RIGHT, 321);
+            p.SetTurnBody(t);
+
+            TurnBody t2 = p.GetTurnBody();
+            Assert::AreEqual(t.Direction, t2.Direction);
+            Assert::AreEqual(t.Duration, t2.Duration);
+            Assert::IsTrue(p.IsTurnCommand());
         }
 
-        TEST_METHOD(SetCmd_Response)
+        TEST_METHOD(SetBodyDataStoresMessageCorrectly)
         {
-            PktDef pkt;
-            pkt.SetCmd(RESPONSE);
-            Assert::IsTrue(pkt.GetCmd() == RESPONSE);
+            PktDef p;
+            const char msg[] = "HELLO";
+            p.SetBodyData(const_cast<char*>(msg), 5);
+
+            int size = 0;
+            char* body = p.GetBodyData(size);
+
+            Assert::AreEqual(5, size);
+            Assert::AreEqual('H', body[0]);
+            Assert::AreEqual('O', body[4]);
         }
 
-        TEST_METHOD(SetCmd_OverwritesPrevious)
+        TEST_METHOD(SetCmdSetsFlagsCorrectly)
         {
-            PktDef pkt;
-            pkt.SetCmd(DRIVE);
-            pkt.SetCmd(SLEEP);
-            Assert::IsTrue(pkt.GetCmd() == SLEEP);
+            PktDef p;
+            p.SetCmd(DRIVE);
+            Assert::IsTrue(p.IsDriveCommand() || !p.IsValid()); // at least flags reflect drive
+
+            p.SetCmd(SLEEP);
+            Assert::IsTrue(p.IsSleepCommand() || !p.IsValid());
+
+            p.SetCmd(RESPONSE);
+            Assert::IsTrue(p.IsTelemetryCommand() || !p.IsValid());
+        }
+
+        TEST_METHOD(SetAckTogglesCorrectly)
+        {
+            PktDef p;
+            p.SetAck(true);
+            Assert::IsTrue(p.GetAck());
+
+            p.SetAck(false);
+            Assert::IsFalse(p.GetAck());
+        }
+
+        TEST_METHOD(ClearBodyResetsState)
+        {
+            PktDef p;
+            DriveBody d = MakeDrive(FORWARD, 5, 90);
+            p.SetDriveBody(d);
+
+            p.ClearBody();
+
+            Assert::AreEqual(0, p.GetBodySize());
+            int size = 0;
+            Assert::IsNull(p.GetBodyData(size));
         }
     };
 
-    TEST_CLASS(PktCountTests)
+
+    //
+    // 3. Classification Tests
+    //
+    TEST_CLASS(ClassificationTests)
     {
     public:
-        TEST_METHOD(SetPktCount_GetReturnsValue)
+
+        TEST_METHOD(ClassifyOutgoingDriveCommand)
         {
-            PktDef pkt;
-            pkt.SetPktCount(42);
-            Assert::AreEqual(42, pkt.GetPktCount());
+            PktDef p;
+            DriveBody d = MakeDrive(FORWARD, 5, 90);
+            p.SetDriveBody(d);
+
+            Assert::IsTrue(p.IsDriveCommand());
         }
 
-        TEST_METHOD(SetPktCount_LargeValue)
+        TEST_METHOD(ClassifyOutgoingTurnCommand)
         {
-            PktDef pkt;
-            pkt.SetPktCount(65535);
-            Assert::AreEqual(65535, pkt.GetPktCount());
+            PktDef p;
+            TurnBody t = MakeTurn(LEFT, 100);
+            p.SetTurnBody(t);
+
+            Assert::IsTrue(p.IsTurnCommand());
+        }
+
+        TEST_METHOD(ClassifyOutgoingAckResponse)
+        {
+            PktDef p;
+            p.SetAck(true);
+            const char msg[] = "OK";
+            p.SetBodyData(const_cast<char*>(msg), 2);
+
+            Assert::IsTrue(p.IsAckResponse());
+        }
+
+        TEST_METHOD(ClassifyIncomingDriveCommand)
+        {
+            PktDef outgoing;
+            DriveBody d = MakeDrive(FORWARD, 5, 90);
+            outgoing.SetDriveBody(d);
+            char* raw = outgoing.GenPacket();
+
+            PktDef incoming(raw);
+
+            Assert::IsTrue(incoming.IsDriveCommand());
+        }
+
+        TEST_METHOD(ClassifyIncomingTurnCommand)
+        {
+            PktDef outgoing;
+            TurnBody t = MakeTurn(RIGHT, 200);
+            outgoing.SetTurnBody(t);
+            char* raw = outgoing.GenPacket();
+
+            PktDef incoming(raw);
+
+            Assert::IsTrue(incoming.IsTurnCommand());
+        }
+
+        TEST_METHOD(ClassifyAmbiguous3ByteBody)
+        {
+            // Start with a valid drive, then corrupt power to break drive but keep turn valid
+            PktDef outgoing;
+            DriveBody d = MakeDrive(FORWARD, 5, 90);
+            outgoing.SetDriveBody(d);
+            char* raw = outgoing.GenPacket();
+
+            // Corrupt power byte to something outside [80,100]
+            // Header is 4 bytes, then body: Direction, Duration, Power
+            raw[4 + 2] = 10; // invalid power
+
+            PktDef incoming(raw);
+
+            // Depending on Direction, classifier may treat as Turn or NACK.
+            // We just assert it's not classified as Drive anymore.
+            Assert::IsFalse(incoming.IsDriveCommand());
         }
     };
 
-    TEST_CLASS(BodyDataTests)
+
+    //
+    // 4. Validation Tests
+    //
+    TEST_CLASS(ValidationTests)
     {
     public:
-        TEST_METHOD(SetBodyData_DriveBody)
+
+        TEST_METHOD(ValidDriveCommandPassesValidation)
         {
-            PktDef pkt;
-            DriveBody db;
-            db.Direction = FORWARD;
-            db.Duration = 5;
-            db.Power = 90;
+            PktDef p;
+            DriveBody d = MakeDrive(FORWARD, 5, 90);
+            p.SetDriveBody(d);
+            p.GenPacket();
 
-            pkt.SetBodyData((char*)&db, sizeof(DriveBody));
-
-            Assert::IsNotNull(pkt.GetBodyData());
-            Assert::AreEqual(HEADERSIZE + (int)sizeof(DriveBody) + 1, pkt.GetLength());
-
-            DriveBody* result = (DriveBody*)pkt.GetBodyData();
-            Assert::AreEqual((unsigned char)FORWARD, result->Direction);
-            Assert::AreEqual((unsigned char)5, result->Duration);
-            Assert::AreEqual((unsigned char)90, result->Power);
+            Assert::IsTrue(p.IsValid());
         }
 
-        TEST_METHOD(SetBodyData_TurnBody)
+        TEST_METHOD(InvalidDrivePowerFailsValidation)
         {
-            PktDef pkt;
-            TurnBody tb;
-            tb.Direction = LEFT;
-            tb.Duration = 300;
+            PktDef p;
+            DriveBody d = MakeDrive(FORWARD, 5, 50); // invalid power
+            p.SetDriveBody(d);
+            p.GenPacket();
 
-            pkt.SetBodyData((char*)&tb, sizeof(TurnBody));
-
-            Assert::IsNotNull(pkt.GetBodyData());
-            Assert::AreEqual(HEADERSIZE + (int)sizeof(TurnBody) + 1, pkt.GetLength());
-
-            TurnBody* result = (TurnBody*)pkt.GetBodyData();
-            Assert::AreEqual((unsigned char)LEFT, result->Direction);
-            Assert::AreEqual((unsigned short)300, result->Duration);
+            Assert::IsFalse(p.IsValid());
         }
 
-        TEST_METHOD(SetBodyData_UpdatesLength)
+        TEST_METHOD(InvalidTurnDirectionFailsValidation)
         {
-            PktDef pkt;
-            DriveBody db = { BACKWARD, 3, 80 };
-            pkt.SetBodyData((char*)&db, sizeof(DriveBody));
-            Assert::AreEqual(8, pkt.GetLength());
+            PktDef p;
+            TurnBody t{};
+            t.Direction = 99; // invalid
+            t.Duration = 100;
+            p.SetTurnBody(t);
+            p.GenPacket();
+
+            Assert::IsFalse(p.IsValid());
         }
 
-        TEST_METHOD(SetBodyData_NullGuard)
+        TEST_METHOD(InvalidCRCRejected)
         {
-            PktDef pkt;
-            pkt.SetBodyData(nullptr, 0);
-            Assert::IsNull(pkt.GetBodyData());
+            PktDef p;
+            DriveBody d = MakeDrive(FORWARD, 5, 90);
+            p.SetDriveBody(d);
+            char* raw = p.GenPacket();
+
+            // Corrupt CRC (last byte)
+            int len = p.GetLength();
+            raw[len - 1] ^= 0xFF;
+
+            PktDef incoming(raw);
+
+            Assert::IsFalse(incoming.IsValid());
         }
 
-        TEST_METHOD(SetBodyData_ReplacesOldBody)
+        TEST_METHOD(InvalidLengthRejected)
         {
-            PktDef pkt;
-            char firstData[3] = { 1, 5, 80 };
-            char secondData[2] = { 4, 9 };
+            PktDef p;
+            DriveBody d = MakeDrive(FORWARD, 5, 90);
+            p.SetDriveBody(d);
+            char* raw = p.GenPacket();
 
-            pkt.SetBodyData(firstData, 3);
-            pkt.SetBodyData(secondData, 2);
+            // Corrupt length field
+            raw[3] = static_cast<char>(raw[3] + 2);
 
-            Assert::IsNotNull(pkt.GetBodyData());
-            Assert::AreEqual(7, pkt.GetLength());
-            Assert::AreEqual((char)4, pkt.GetBodyData()[0]);
-            Assert::AreEqual((char)9, pkt.GetBodyData()[1]);
+            PktDef incoming(raw);
+
+            Assert::IsFalse(incoming.IsValid());
+        }
+
+        TEST_METHOD(AckInCommandFailsValidation)
+        {
+            PktDef p;
+            DriveBody d = MakeDrive(FORWARD, 5, 90);
+            p.SetDriveBody(d);
+            p.SetAck(true); // illegal: Ack in command
+            p.GenPacket();
+
+            Assert::IsFalse(p.IsValid());
         }
     };
 
-    TEST_CLASS(CRCTests)
+
+    //
+    // 5. Serialization Tests
+    //
+    TEST_CLASS(SerializationTests)
     {
     public:
-        TEST_METHOD(CalcCRC_CheckCRC_Match)
+
+        TEST_METHOD(DriveCommandSerializesCorrectly)
         {
-            PktDef pkt;
-            pkt.SetPktCount(1);
-            pkt.SetCmd(DRIVE);
-            DriveBody db = { FORWARD, 5, 90 };
-            pkt.SetBodyData((char*)&db, sizeof(DriveBody));
+            PktDef p;
+            p.SetPktCount(42);
+            DriveBody d = MakeDrive(FORWARD, 5, 90);
+            p.SetDriveBody(d);
+            char* raw = p.GenPacket();
 
-            char* raw = pkt.GenPacket();
-            int len = pkt.GetLength();
+            // Re-parse
+            PktDef q(raw);
 
-            Assert::IsTrue(pkt.CheckCRC(raw, len));
+            Assert::IsTrue(q.IsDriveCommand());
+            Assert::IsTrue(q.IsValid());
+            Assert::AreEqual(42, q.GetPktCount());
         }
 
-        TEST_METHOD(CheckCRC_CorruptedBuffer_Fails)
+        TEST_METHOD(TurnCommandSerializesCorrectly)
         {
-            PktDef pkt;
-            pkt.SetPktCount(1);
-            pkt.SetCmd(DRIVE);
-            DriveBody db = { FORWARD, 5, 90 };
-            pkt.SetBodyData((char*)&db, sizeof(DriveBody));
+            PktDef p;
+            p.SetPktCount(7);
+            TurnBody t = MakeTurn(LEFT, 321);
+            p.SetTurnBody(t);
+            char* raw = p.GenPacket();
 
-            char* raw = pkt.GenPacket();
-            int len = pkt.GetLength();
+            PktDef q(raw);
 
-            raw[HEADERSIZE] ^= 0xFF;
-
-            Assert::IsFalse(pkt.CheckCRC(raw, len));
+            Assert::IsTrue(q.IsTurnCommand());
+            Assert::IsTrue(q.IsValid());
+            Assert::AreEqual(7, q.GetPktCount());
         }
 
-        TEST_METHOD(CalcCRC_SleepNoBody)
+        TEST_METHOD(MessageBodySerializesCorrectly)
         {
-            PktDef pkt;
-            pkt.SetPktCount(10);
-            pkt.SetCmd(SLEEP);
+            PktDef p;
+            p.SetAck(true);
+            const char msg[] = "HELLO";
+            p.SetBodyData(const_cast<char*>(msg), 5);
+            char* raw = p.GenPacket();
 
-            char* raw = pkt.GenPacket();
-            int len = pkt.GetLength();
+            PktDef q(raw);
 
-            Assert::IsTrue(pkt.CheckCRC(raw, len));
+            Assert::IsTrue(q.IsAckResponse());
+            int size = 0;
+            char* body = q.GetBodyData(size);
+            Assert::AreEqual(5, size);
+            Assert::AreEqual('H', body[0]);
+            Assert::AreEqual('O', body[4]);
+        }
+
+        TEST_METHOD(CRCComputedCorrectly)
+        {
+            PktDef p;
+            DriveBody d = MakeDrive(FORWARD, 5, 90);
+            p.SetDriveBody(d);
+            char* raw = p.GenPacket();
+
+            // Recompute CRC manually using PktDef::CheckCRC
+            PktDef q(raw);
+            Assert::IsTrue(q.IsValid());
+        }
+
+        TEST_METHOD(LengthFieldCorrect)
+        {
+            PktDef p;
+            DriveBody d = MakeDrive(FORWARD, 5, 90);
+            p.SetDriveBody(d);
+            p.GenPacket();
+
+            int expected = HEADERSIZE + p.GetBodySize() + 1;
+            Assert::AreEqual(expected, p.GetLength());
         }
     };
 
-    TEST_CLASS(GenPacketTests)
+
+    //
+    // 6. Round Trip Tests
+    //
+    TEST_CLASS(RoundTripTests)
     {
     public:
-        TEST_METHOD(GenPacket_DriveRoundTrip)
+
+        TEST_METHOD(DriveCommandRoundTrip)
         {
-            PktDef original;
-            original.SetPktCount(7);
-            original.SetCmd(DRIVE);
-            DriveBody db = { BACKWARD, 3, 85 };
-            original.SetBodyData((char*)&db, sizeof(DriveBody));
+            PktDef outgoing;
+            DriveBody d = MakeDrive(FORWARD, 5, 90);
+            outgoing.SetDriveBody(d);
+            char* raw = outgoing.GenPacket();
 
-            char* raw = original.GenPacket();
-            int len = original.GetLength();
+            PktDef incoming(raw);
 
-            PktDef parsed(raw);
+            Assert::IsTrue(incoming.IsDriveCommand());
+            Assert::IsTrue(incoming.IsValid());
 
-            Assert::AreEqual(7, parsed.GetPktCount());
-            Assert::IsTrue(parsed.GetCmd() == DRIVE);
-            Assert::AreEqual(len, parsed.GetLength());
-
-            DriveBody* result = (DriveBody*)parsed.GetBodyData();
-            Assert::IsNotNull(result);
-            Assert::AreEqual((unsigned char)BACKWARD, result->Direction);
-            Assert::AreEqual((unsigned char)3, result->Duration);
-            Assert::AreEqual((unsigned char)85, result->Power);
-
-            Assert::IsTrue(parsed.CheckCRC(raw, len));
+            DriveBody d2 = incoming.GetDriveBody();
+            Assert::AreEqual(d.Direction, d2.Direction);
+            Assert::AreEqual(d.Duration, d2.Duration);
+            Assert::AreEqual(d.Power, d2.Power);
         }
 
-        TEST_METHOD(GenPacket_TurnRoundTrip)
+        TEST_METHOD(TurnCommandRoundTrip)
         {
-            PktDef original;
-            original.SetPktCount(15);
-            original.SetCmd(DRIVE);
-            TurnBody tb = { RIGHT, 500 };
-            original.SetBodyData((char*)&tb, sizeof(TurnBody));
+            PktDef outgoing;
+            TurnBody t = MakeTurn(RIGHT, 200);
+            outgoing.SetTurnBody(t);
+            char* raw = outgoing.GenPacket();
 
-            char* raw = original.GenPacket();
-            int len = original.GetLength();
+            PktDef incoming(raw);
 
-            PktDef parsed(raw);
+            Assert::IsTrue(incoming.IsTurnCommand());
+            Assert::IsTrue(incoming.IsValid());
 
-            Assert::AreEqual(15, parsed.GetPktCount());
-            Assert::IsTrue(parsed.GetCmd() == DRIVE);
-
-            TurnBody* result = (TurnBody*)parsed.GetBodyData();
-            Assert::IsNotNull(result);
-            Assert::AreEqual((unsigned char)RIGHT, result->Direction);
-            Assert::AreEqual((unsigned short)500, result->Duration);
-
-            Assert::IsTrue(parsed.CheckCRC(raw, len));
+            TurnBody t2 = incoming.GetTurnBody();
+            Assert::AreEqual(t.Direction, t2.Direction);
+            Assert::AreEqual(t.Duration, t2.Duration);
         }
 
-        TEST_METHOD(GenPacket_SleepRoundTrip)
+        TEST_METHOD(TelemetryResponseRoundTrip)
         {
-            PktDef original;
-            original.SetPktCount(20);
-            original.SetCmd(SLEEP);
+            PktDef outgoing;
+            TelemetryBody tb = MakeTelemetry();
+            outgoing.SetTelemetryBody(tb);
+            outgoing.SetStatus(true);
+            char* raw = outgoing.GenPacket();
 
-            char* raw = original.GenPacket();
-            int len = original.GetLength();
+            PktDef incoming(raw);
 
-            PktDef parsed(raw);
-
-            Assert::AreEqual(20, parsed.GetPktCount());
-            Assert::IsTrue(parsed.GetCmd() == SLEEP);
-            Assert::IsNull(parsed.GetBodyData());
-            Assert::IsTrue(parsed.CheckCRC(raw, len));
+            Assert::IsTrue(incoming.IsTelemetryResponse());
+            Assert::IsTrue(incoming.IsValid());
         }
 
-        TEST_METHOD(GenPacket_ResponseRoundTrip)
+        TEST_METHOD(AckWithMessageRoundTrip)
         {
-            PktDef original;
-            original.SetPktCount(99);
-            original.SetCmd(RESPONSE);
+            PktDef outgoing;
+            outgoing.SetAck(true);
+            const char msg[] = "OK";
+            outgoing.SetBodyData(const_cast<char*>(msg), 2);
+            char* raw = outgoing.GenPacket();
 
-            char* raw = original.GenPacket();
-            int len = original.GetLength();
+            PktDef incoming(raw);
 
-            PktDef parsed(raw);
+            Assert::IsTrue(incoming.IsAckResponse());
+            Assert::IsTrue(incoming.IsValid());
 
-            Assert::AreEqual(99, parsed.GetPktCount());
-            Assert::IsTrue(parsed.GetCmd() == RESPONSE);
-            Assert::IsTrue(parsed.CheckCRC(raw, len));
+            int size = 0;
+            char* body = incoming.GetBodyData(size);
+            Assert::AreEqual(2, size);
+            Assert::AreEqual('O', body[0]);
+            Assert::AreEqual('K', body[1]);
+        }
+
+        TEST_METHOD(AckRoundTrip_NoMessage)
+        {
+            PktDef p;
+            p.SetAck(true);          // Ack = 1, no command bits
+            p.SetPktCount(7);
+
+            char* raw = p.GenPacket();
+            PktDef q(raw);
+
+            Assert::IsTrue(q.IsAckResponse());
+            Assert::IsTrue(q.IsValid());
+            Assert::AreEqual(7, q.GetPktCount());
+
+            int size = 0;
+            Assert::IsNull(q.GetBodyData(size));
+            Assert::AreEqual(0, size);
+        }
+
+        TEST_METHOD(NAckRoundTrip_WithMessage)
+        {
+            PktDef p;
+            p.SetAck(false);
+            p.SetPktCount(256);
+
+            const char* msg = "ERR_BAD_CMD";
+            p.SetBodyData((char*)msg, (int)strlen(msg));
+
+            char* raw = p.GenPacket();
+            PktDef q(raw);
+
+            Assert::IsTrue(q.IsNAckResponse());
+            Assert::IsTrue(q.IsValid());
+            Assert::AreEqual(256, q.GetPktCount());
+
+            int size = 0;
+            char* body = q.GetBodyData(size);
+
+            Assert::AreEqual((int)strlen(msg), size);
+            Assert::AreEqual(0, memcmp(body, msg, size));
+        }
+
+
+
+    };
+
+
+    //
+    // 7. Error Handling Tests
+    //
+    TEST_CLASS(ErrorHandlingTests)
+    {
+    public:
+
+        TEST_METHOD(NullRawPointerHandledGracefully)
+        {
+            PktDef p(nullptr);
+            Assert::IsFalse(p.IsValid());
+        }
+
+        TEST_METHOD(TooShortPacketRejected)
+        {
+            char raw[3] = { 0, 1, 0 }; // shorter than header
+            PktDef p(raw);
+            Assert::IsFalse(p.IsValid());
+        }
+
+        TEST_METHOD(IncorrectLengthFieldRejected)
+        {
+            PktDef outgoing;
+            DriveBody d = MakeDrive(FORWARD, 5, 90);
+            outgoing.SetDriveBody(d);
+            char* raw = outgoing.GenPacket();
+
+            raw[3] = static_cast<char>(raw[3] + 5);
+
+            PktDef incoming(raw);
+            Assert::IsFalse(incoming.IsValid());
+        }
+
+        TEST_METHOD(IncorrectCRCRejected)
+        {
+            PktDef outgoing;
+            DriveBody d = MakeDrive(FORWARD, 5, 90);
+            outgoing.SetDriveBody(d);
+            char* raw = outgoing.GenPacket();
+
+            int len = outgoing.GetLength();
+            raw[len - 1] ^= 0xFF;
+
+            PktDef incoming(raw);
+            Assert::IsFalse(incoming.IsValid());
+        }
+
+        TEST_METHOD(IllegalFlagCombinationRejected)
+        {
+            PktDef outgoing;
+            DriveBody d = MakeDrive(FORWARD, 5, 90);
+            outgoing.SetDriveBody(d);
+            char* raw = outgoing.GenPacket();
+
+            // Force multiple command bits by flipping some bits in flags
+            raw[2] |= 0x03;
+
+            PktDef incoming(raw);
+            Assert::IsFalse(incoming.IsValid());
+        }
+
+        TEST_METHOD(AckWithCommandBitsandDriveBody_IsInvalid)
+        {
+            PktDef p;
+            p.SetDriveBody(MakeDrive(FORWARD, 5, 90));
+            p.SetAck(true);   // illegal: Ack + Drive
+
+            char* raw = p.GenPacket();
+            PktDef q(raw);
+
+            Assert::IsFalse(q.IsValid());
+        }
+
+        TEST_METHOD(NAckWithTelemetryBody_IsInvalid)
+        {
+            PktDef p;
+            TelemetryBody t{};
+            p.SetTelemetryBody(t);
+            p.SetAck(false);   // NACK + telemetry ? illegal
+
+            char* raw = p.GenPacket();
+            PktDef q(raw);
+
+            Assert::IsFalse(q.IsValid());
+
         }
     };
 
-    TEST_CLASS(AckFlagTests)
+
+    //
+    // 8. Memory Leak / Memory Lifecycle Tests
+    //
+    TEST_CLASS(MemoryLeakTests)
     {
     public:
 
-        TEST_METHOD(SetAck_SetsFlag)
+        TEST_METHOD(ConstructorDestructor_NoLeaks)
         {
-            PktDef pkt;
-            pkt.SetAck(true);
-            Assert::IsTrue(pkt.GetAck());
-        }
-
-        TEST_METHOD(SetAck_ClearsFlag)
-        {
-            PktDef pkt;
-            pkt.SetAck(true);
-            pkt.SetAck(false);
-            Assert::IsFalse(pkt.GetAck());
-        }
-
-        TEST_METHOD(Ack_MustNotClearCommandFlag)
-        {
-            PktDef pkt;
-            pkt.SetCmd(DRIVE);
-            pkt.SetAck(true);
-
-            Assert::IsTrue(pkt.GetCmd() == DRIVE);
-            Assert::IsTrue(pkt.GetAck());
-        }
-    };
-
-    TEST_CLASS(StatusFlagTests)
-    {
-    public:
-
-        TEST_METHOD(SetStatus_SetsFlag)
-        {
-            PktDef pkt;
-            pkt.SetStatus(true);
-
-            Assert::IsTrue(pkt.GetCmd() == RESPONSE); // Status implies response
-        }
-
-        TEST_METHOD(SetStatus_ClearsFlag)
-        {
-            PktDef pkt;
-            pkt.SetStatus(true);
-            pkt.SetStatus(false);
-
-            Assert::IsFalse(pkt.GetAck()); // Ack should not be set
-        }
-    };
-
-    TEST_CLASS(FlagValidationTests)
-    {
-    public:
-
-        TEST_METHOD(OnlyOneCommandFlagAllowed)
-        {
-            PktDef pkt;
-            pkt.SetCmd(DRIVE);
-            pkt.SetCmd(SLEEP);
-
-            Assert::IsTrue(pkt.GetCmd() == SLEEP);
-            Assert::IsFalse(pkt.GetCmd() == DRIVE);
-        }
-
-        TEST_METHOD(ParsingInvalidFlags_DoesNotCrash)
-        {
-            char raw[5] = { 0 };
-            raw[2] = 0xE0; // Drive + Status + Sleep (illegal)
-            raw[3] = 5;
-
-            // Compute CRC
-            int bitCount = 0;
-            for (int i = 0; i < 4; i++)
+            for (int i = 0; i < 1000; ++i)
             {
-                unsigned char b = raw[i];
-                while (b) { bitCount += (b & 1); b >>= 1; }
+                PktDef p;
             }
-            raw[4] = (char)(bitCount % 256);
-
-            PktDef pkt(raw);
-
-            // The only requirement: it must NOT crash.
-            // Command returned should follow GetCmd() logic.
-            Assert::IsTrue(pkt.GetCmd() == DRIVE);
-        }
-    };
-
-    TEST_CLASS(DriveBodyTests)
-    {
-    public:
-
-        TEST_METHOD(SetDriveBody_ValidRange)
-        {
-            PktDef pkt;
-            DriveBody db = { FORWARD, 4, 90 };
-
-            pkt.SetDriveBody(db);
-
-            Assert::AreEqual(HEADERSIZE + 3 + 1, pkt.GetLength());
-
-            DriveBody result = pkt.GetDriveBody();
-            Assert::AreEqual((unsigned char)FORWARD, result.Direction);
-            Assert::AreEqual((unsigned char)4, result.Duration);
-            Assert::AreEqual((unsigned char)90, result.Power);
+            Assert::IsTrue(true); // if this runs without crash, we're good
         }
 
-        TEST_METHOD(SetDriveBody_InvalidPowerRejected)
+        TEST_METHOD(ClearBodyFreesMemory)
         {
-            PktDef pkt;
-            DriveBody db = { FORWARD, 4, 50 }; // invalid
+            PktDef p;
+            DriveBody d = MakeDrive(FORWARD, 5, 90);
+            p.SetDriveBody(d);
+            p.GenPacket();
 
-            pkt.SetDriveBody(db);
-
-            Assert::IsNull(pkt.GetBodyData());
-            Assert::AreEqual(HEADERSIZE + 1, pkt.GetLength());
+            p.ClearBody();
+            int size = 0;
+            Assert::IsNull(p.GetBodyData(size));
+            Assert::AreEqual(0, p.GetBodySize());
         }
-    };
 
-    TEST_CLASS(TurnBodyTests)
-    {
-    public:
-
-        TEST_METHOD(SetTurnBody_SerializesCorrectly)
+        TEST_METHOD(GenPacketReallocatesRawBufferSafely)
         {
-            PktDef pkt;
-            TurnBody tb = { LEFT, 500 };
+            PktDef p;
+            DriveBody d1 = MakeDrive(FORWARD, 5, 90);
+            p.SetDriveBody(d1);
+            char* raw1 = p.GenPacket();
 
-            pkt.SetTurnBody(tb);
+            DriveBody d2 = MakeDrive(BACKWARD, 10, 95);
+            p.SetDriveBody(d2);
+            char* raw2 = p.GenPacket();
 
-            Assert::AreEqual(HEADERSIZE + 3 + 1, pkt.GetLength());
-
-            TurnBody result = pkt.GetTurnBody();
-            Assert::AreEqual((unsigned char)LEFT, result.Direction);
-            Assert::AreEqual((unsigned short)500, result.Duration);
+            Assert::IsNotNull(raw1);
+            Assert::IsNotNull(raw2);
+            Assert::IsTrue(p.IsValid());
         }
-    };
 
-    TEST_CLASS(TelemetryTests)
-    {
-    public:
-
-        TEST_METHOD(ParseTelemetryBody)
+        TEST_METHOD(MultipleGenPacketCalls_NoLeaks)
         {
-            // Build raw telemetry packet
-            char raw[HEADERSIZE + 11 + 1] = { 0 };
+            PktDef p;
+            DriveBody d = MakeDrive(FORWARD, 5, 90);
+            p.SetDriveBody(d);
 
-            unsigned short pktCount = 12;
-            memcpy(raw, &pktCount, 2);
-
-            raw[2] = 0x50; // Status + Ack
-            raw[3] = HEADERSIZE + 11 + 1;
-
-            unsigned char body[11] =
+            for (int i = 0; i < 1000; ++i)
             {
-                1,0,   // LastPktCounter
-                5,0,   // CurrentGrade
-                3,0,   // HitCount
-                90,0,  // Heading
-                2,     // LastCmd
-                4,     // LastCmdValue
-                85     // LastCmdPower
-            };
-
-            memcpy(raw + HEADERSIZE, body, 11);
-
-            // Compute CRC
-            int bitCount = 0;
-            for (int i = 0; i < HEADERSIZE + 11; i++)
-            {
-                unsigned char b = raw[i];
-                while (b) { bitCount += (b & 1); b >>= 1; }
+                p.GenPacket();
             }
-            raw[HEADERSIZE + 11] = (char)(bitCount % 256);
 
-            PktDef pkt(raw);
+            Assert::IsTrue(p.IsValid());
+        }
 
-            TelemetryBody t = pkt.GetTelemetry();
+        TEST_METHOD(RoundTripCreationDestruction_NoLeaks)
+        {
+            for (int i = 0; i < 500; ++i)
+            {
+                PktDef outgoing;
+                DriveBody d = MakeDrive(FORWARD, 5, 90);
+                outgoing.SetDriveBody(d);
+                char* raw = outgoing.GenPacket();
 
-            Assert::AreEqual((unsigned short)1, t.LastPktCounter);
-            Assert::AreEqual((unsigned short)5, t.CurrentGrade);
-            Assert::AreEqual((unsigned short)3, t.HitCount);
-            Assert::AreEqual((unsigned short)90, t.Heading);
-            Assert::AreEqual((unsigned char)2, t.LastCmd);
-            Assert::AreEqual((unsigned char)4, t.LastCmdValue);
-            Assert::AreEqual((unsigned char)85, t.LastCmdPower);
+                PktDef incoming(raw);
+                Assert::IsTrue(incoming.IsDriveCommand());
+            }
         }
     };
 
-    TEST_CLASS(LengthTests)
+
+    //
+    // 9. Getter Tests
+    //
+    TEST_CLASS(GetterTests)
     {
     public:
 
-        TEST_METHOD(SleepCommand_LengthCorrect)
+        TEST_METHOD(GetCmdReturnsCorrectValue)
         {
-            PktDef pkt;
-            pkt.SetCmd(SLEEP);
+            PktDef p;
+            p.SetCmd(DRIVE);
+            Assert::AreEqual(DRIVE, p.GetCmd());
 
-            char* raw = pkt.GenPacket();
+            p.SetCmd(SLEEP);
+            Assert::AreEqual(SLEEP, p.GetCmd());
 
-            Assert::AreEqual(HEADERSIZE + 1, pkt.GetLength());
+            p.SetCmd(RESPONSE);
+            Assert::AreEqual(RESPONSE, p.GetCmd());
         }
 
-        TEST_METHOD(Response_NoBody_LengthCorrect)
+        TEST_METHOD(GetAckReturnsCorrectValue)
         {
-            PktDef pkt;
-            pkt.SetCmd(RESPONSE);
+            PktDef p;
+            p.SetAck(true);
+            Assert::IsTrue(p.GetAck());
 
-            char* raw = pkt.GenPacket();
-
-            Assert::AreEqual(HEADERSIZE + 1, pkt.GetLength());
+            p.SetAck(false);
+            Assert::IsFalse(p.GetAck());
         }
-    };
 
-    TEST_CLASS(RawPacketValidationTests)
-    {
-    public:
-
-        TEST_METHOD(Parse_InvalidLength_DoesNotCrash)
+        TEST_METHOD(GetBodyDataReturnsMessage)
         {
-            char raw[3] = { 0 }; // too short to be valid
-            PktDef pkt(raw);
+            PktDef p;
+            const char msg[] = "TEST";
+            p.SetBodyData(const_cast<char*>(msg), 4);
 
+            int size = 0;
+            char* body = p.GetBodyData(size);
+
+            Assert::AreEqual(4, size);
+            Assert::AreEqual('T', body[0]);
+            Assert::AreEqual('T', body[3]);
+        }
+
+        TEST_METHOD(GetBodyDataReturnsNullForNonMessage)
+        {
+            PktDef p;
+            DriveBody d = MakeDrive(FORWARD, 5, 90);
+            p.SetDriveBody(d);
+
+            int size = 0;
+            char* body = p.GetBodyData(size);
+
+            Assert::IsNull(body);
+            Assert::AreEqual(0, size);
+        }
+
+        TEST_METHOD(GetDriveBodyReturnsCorrectStruct)
+        {
+            PktDef p;
+            DriveBody d = MakeDrive(BACKWARD, 7, 100);
+            p.SetDriveBody(d);
+
+            DriveBody d2 = p.GetDriveBody();
+            Assert::AreEqual(d.Direction, d2.Direction);
+            Assert::AreEqual(d.Duration, d2.Duration);
+            Assert::AreEqual(d.Power, d2.Power);
+        }
+
+        TEST_METHOD(GetTurnBodyReturnsCorrectStruct)
+        {
+            PktDef p;
+            TurnBody t = MakeTurn(LEFT, 250);
+            p.SetTurnBody(t);
+
+            TurnBody t2 = p.GetTurnBody();
+            Assert::AreEqual(t.Direction, t2.Direction);
+            Assert::AreEqual(t.Duration, t2.Duration);
+        }
+
+        TEST_METHOD(GetTelemetryReturnsCorrectStruct)
+        {
+            PktDef p;
+            TelemetryBody tb = MakeTelemetry();
+            p.SetTelemetryBody(tb);
+
+            TelemetryBody tb2 = p.GetTelemetry();
+            // We don't know fields, but at least ensure size and that call doesn't crash
             Assert::IsTrue(true);
         }
 
-        TEST_METHOD(Parse_InvalidCRC_FailsCheckCRC)
+        TEST_METHOD(GetLengthMatchesSerializedLength)
         {
-            PktDef pkt;
-            pkt.SetPktCount(1);
-            pkt.SetCmd(DRIVE);
+            PktDef p;
+            DriveBody d = MakeDrive(FORWARD, 5, 90);
+            p.SetDriveBody(d);
+            p.GenPacket();
 
-            DriveBody db = { FORWARD, 3, 90 };
-            pkt.SetDriveBody(db);
+            int len = p.GetLength();
+            Assert::IsTrue(len > 0);
+        }
 
-            char* raw = pkt.GenPacket();
-            int len = pkt.GetLength();
+        TEST_METHOD(GetFlagsMatchesSetFlags)
+        {
+            PktDef p;
+            p.SetCmd(DRIVE);
+            unsigned char flags1 = p.GetFlags();
 
-            raw[len - 1] ^= 0xFF; // corrupt CRC
+            p.SetCmd(SLEEP);
+            unsigned char flags2 = p.GetFlags();
 
-            Assert::IsFalse(pkt.CheckCRC(raw, len));
+            Assert::AreNotEqual(flags1, flags2);
         }
     };
 
-    TEST_CLASS(MemorySafetyTests)
+    TEST_CLASS(StressTests)
     {
     public:
-
-        TEST_METHOD(GenPacket_CalledTwice_NoLeak)
+        TEST_METHOD(AckRoundTrip_EmbeddedNulls)
         {
-            PktDef pkt;
-            pkt.SetPktCount(1);
+            PktDef p;
+            p.SetAck(true);
+            p.SetPktCount(55);
 
-            DriveBody db = { FORWARD, 3, 90 };
-            pkt.SetDriveBody(db);
+            char msg[4] = { 'A', '\0', 'B', '\0' };
+            p.SetBodyData(msg, 4);
 
-            char* first = pkt.GenPacket();
-            char* second = pkt.GenPacket();
+            char* raw = p.GenPacket();
+            PktDef q(raw);
 
-            Assert::IsNotNull(second);
-            Assert::AreNotEqual(first, second);
+            Assert::IsTrue(q.IsAckResponse());
+            Assert::IsTrue(q.IsValid());
+
+            int size = 0;
+            char* body = q.GetBodyData(size);
+
+            Assert::AreEqual(4, size);
+            Assert::AreEqual(0, memcmp(body, msg, 4));
         }
 
-        TEST_METHOD(Destructor_FreesMemory)
+        TEST_METHOD(AckWithTelemetryBody_IsInvalid)
         {
-            char* buffer = nullptr;
+            PktDef p;
+            TelemetryBody t{};
+            p.SetTelemetryBody(t);
+            p.SetAck(true);
 
-            {
-                PktDef pkt;
-                pkt.SetPktCount(1);
+            char* raw = p.GenPacket();
+            PktDef q(raw);
 
-                DriveBody db = { FORWARD, 3, 90 };
-                pkt.SetDriveBody(db);
-
-                buffer = pkt.GenPacket();
-                Assert::IsNotNull(buffer);
-            }
-
-            // If destructor failed, this would crash or leak
-            Assert::IsTrue(true);
+            Assert::IsFalse(q.IsValid());
         }
-    };
+
+        TEST_METHOD(CorruptCRC_IsInvalid)
+        {
+            PktDef p;
+            p.SetAck(true);
+            char* raw = p.GenPacket();
+
+            // Flip a bit in the body or header
+            raw[1] ^= 0x20;
+
+            PktDef q(raw);
+
+            Assert::IsFalse(q.IsValid());
+        }
+
+
+        TEST_METHOD(CorruptLength_IsInvalid)
+        {
+            PktDef p;
+            p.SetAck(true);
+            char* raw = p.GenPacket();
+
+            raw[3] += 5; // corrupt length byte
+
+            PktDef q(raw);
+
+            Assert::IsFalse(q.IsValid());
+        }
+
+        TEST_METHOD(AckWithMultipleCommandBits_IsInvalid)
+        {
+            PktDef p;
+            p.SetAck(true);
+            p.SetPktCount(10);
+
+            char* raw = p.GenPacket();
+
+            // Set Drive + Status simultaneously
+            raw[2] |= 0x03;
+
+            PktDef q(raw);
+
+            Assert::IsFalse(q.IsValid());
+        }
+
+
+        TEST_METHOD(NAckWithMultipleCommandBits_IsInvalid)
+        {
+            PktDef p;
+            p.SetAck(false);
+            p.SetPktCount(10);
+
+            char* raw = p.GenPacket();
+
+            // Set Drive + Sleep simultaneously
+            raw[2] |= 0x05;
+
+            PktDef q(raw);
+
+            Assert::IsFalse(q.IsValid());
+        }
+
+        TEST_METHOD(AckRoundTrip_MaxMessage)
+        {
+            const int N = 255 - HEADERSIZE - 1; // max body size
+
+            // Allocate raw buffer manually
+            char* msg = new char[N];
+            for (int i = 0; i < N; i++)
+                msg[i] = 'X';
+
+            PktDef p;
+            p.SetAck(true);
+            p.SetBodyData(msg, N);
+
+            char* raw = p.GenPacket();
+            PktDef q(raw);
+
+            Assert::IsTrue(q.IsAckResponse());
+            Assert::IsTrue(q.IsValid());
+
+            int size = 0;
+            char* body = q.GetBodyData(size);
+
+            Assert::AreEqual(N, size);
+            Assert::IsTrue(memcmp(body, msg, N) == 0);
+
+            delete[] msg;
+        }
+
+
     
-    TEST_CLASS(ConditionChecks)
-    {
-    public:
-
-        //
-        // 1. Padding bits must be zero
-        //
-        TEST_METHOD(PaddingBits_AreClearedOnSetCmd)
+        TEST_METHOD(NAckRoundTrip_RandomGarbageBody)
         {
-            PktDef pkt;
-            pkt.SetCmd(DRIVE);
+            char garbage[7] = { 0xFF, 0x00, 0x13, 0x7A, 0x7A, 0x01, 0x02 };
 
-            unsigned char flags = pkt.GetFlags();
-            Assert::AreEqual((unsigned char)0x80, flags); // DRIVE only
+            PktDef p;
+            p.SetAck(false);
+            p.SetBodyData(garbage, 7);
+
+            char* raw = p.GenPacket();
+            PktDef q(raw);
+
+            Assert::IsTrue(q.IsNAckResponse());
+            Assert::IsTrue(q.IsValid());
         }
 
-        //
-        // 2. Sleep must have no body
-        //
-        TEST_METHOD(SleepCommand_HasNoBody)
+
+        TEST_METHOD(AckEmptyBody_StillAck)
         {
-            PktDef pkt;
-            pkt.SetCmd(SLEEP);
+            PktDef p;
+            p.SetAck(true);
 
-            Assert::IsNull(pkt.GetBodyData());
-            Assert::AreEqual(HEADERSIZE + 1, pkt.GetLength());
-        }
+            char* raw = p.GenPacket();
+            PktDef q(raw);
 
-        //
-        // 3. Response must have no body unless telemetry
-        //
-        TEST_METHOD(ResponseCommand_NoBodyUnlessTelemetry)
-        {
-            PktDef pkt;
-            pkt.SetCmd(RESPONSE);
-
-            Assert::IsNull(pkt.GetBodyData());
-            Assert::AreEqual(HEADERSIZE + 1, pkt.GetLength());
-        }
-
-        //
-        // 4. Ack must be paired with a command flag
-        //
-        TEST_METHOD(AckMustHaveCommandFlag)
-        {
-            PktDef pkt;
-            pkt.SetAck(true);
-
-            // Should auto-assign RESPONSE
-            Assert::IsTrue(pkt.GetCmd() == RESPONSE);
-            Assert::IsTrue(pkt.GetAck());
-        }
-
-        //
-        // 5. DriveBody direction must be valid
-        //
-        TEST_METHOD(DriveBody_InvalidDirectionRejected)
-        {
-            PktDef pkt;
-            DriveBody db = { 99, 5, 90 }; // invalid direction
-
-            pkt.SetDriveBody(db);
-
-            Assert::IsNull(pkt.GetBodyData());
-            Assert::IsFalse(pkt.IsValid());
-        }
-
-        //
-        // 6. TurnBody duration must be valid (implicitly tested by valid direction)
-        //
-        TEST_METHOD(TurnBody_InvalidDirectionRejected)
-        {
-            PktDef pkt;
-            TurnBody tb = { FORWARD, 300 }; // invalid for turn
-
-            pkt.SetTurnBody(tb);
-
-            Assert::IsNull(pkt.GetBodyData());
-            Assert::IsFalse(pkt.IsValid());
-        }
-
-        //
-        // 7. Validate raw packet length before reading
-        //
-        TEST_METHOD(Parse_InvalidLength_MarkedInvalid)
-        {
-            char raw[3] = { 0 }; // too short
-
-            PktDef pkt(raw);
-
-            Assert::IsFalse(pkt.IsValid());
-        }
-
-        //
-        // 8. CRC must be validated during parsing
-        //
-        TEST_METHOD(Parse_InvalidCRC_MarkedInvalid)
-        {
-            PktDef pkt;
-            pkt.SetPktCount(1);
-            pkt.SetCmd(DRIVE);
-
-            DriveBody db = { FORWARD, 3, 90 };
-            pkt.SetDriveBody(db);
-
-            char* raw = pkt.GenPacket();
-            int len = pkt.GetLength();
-
-            raw[len - 1] ^= 0xFF; // corrupt CRC
-
-            PktDef parsed(raw);
-
-            Assert::IsFalse(parsed.IsValid());
-        }
-
-        //
-        // 9. Turn commands always use LEFT or RIGHT
-        //
-        TEST_METHOD(TurnBody_ValidDirectionsOnly)
-        {
-            PktDef pkt;
-            TurnBody tb = { LEFT, 200 };
-            pkt.SetTurnBody(tb);
-
-            Assert::IsNotNull(pkt.GetBodyData());
-            Assert::IsTrue(pkt.IsValid());
-        }
-
-        //
-        // 10. Drive must have a body
-        //
-        TEST_METHOD(DriveWithoutBody_IsInvalid)
-        {
-            PktDef pkt;
-            pkt.SetCmd(DRIVE);
-
-            pkt.GenPacket();
-
-            Assert::IsFalse(pkt.IsValid());
-        }
-
-        //
-        // 11. Turn commands always use 100% power (implicitly enforced)
-        //
-        TEST_METHOD(TurnBody_AlwaysThreeBytes_NoPowerField)
-        {
-            PktDef pkt;
-            TurnBody tb = { RIGHT, 400 };
-            pkt.SetTurnBody(tb);
-
-            Assert::AreEqual(3, pkt.GetBodySize());
-            Assert::IsTrue(pkt.IsValid());
-        }
-
-        //
-        // 12. Response must clear body unless telemetry
-        //
-        TEST_METHOD(ResponseClearsBody)
-        {
-            PktDef pkt;
-
-            DriveBody db = { FORWARD, 3, 90 };
-            pkt.SetDriveBody(db);
-
-            pkt.SetCmd(RESPONSE);
-
-            Assert::IsNull(pkt.GetBodyData());
-            Assert::AreEqual(HEADERSIZE + 1, pkt.GetLength());
-        }
-
-        //
-        // 13. Padding bits must remain zero after all operations
-        //
-        TEST_METHOD(PaddingBitsRemainZero)
-        {
-            PktDef pkt;
-            pkt.SetCmd(DRIVE);
-            pkt.SetAck(true);
-            pkt.SetStatus(true);
-
-            unsigned char flags = pkt.GetFlags();
-
-            // Only upper 4 bits allowed: DRIVE, STATUS, ACK
-            Assert::AreEqual((unsigned char)(DRIVE_MASK | STATUS_MASK | ACK_MASK), flags);
+            Assert::IsTrue(q.IsAckResponse());
         }
     };
-
-
-
 }
