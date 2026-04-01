@@ -1,134 +1,757 @@
-﻿#include "pktdef.h"
-#include <cstring>   // I need this for memcpy
+#include "../PktDefLib/PktDef.h"
+#include <cstring>
+#include <cstdint>
 
 using namespace std;
 
-static int CountOnBitsInByte(unsigned char value)
+// Helper function to count the number of 1 bits in a byte
+static int CountBits(unsigned char value)
 {
     int count = 0;
-
-    while (value > 0)
-    {
+    while (value) {
         count += (value & 1);
         value >>= 1;
     }
-
     return count;
 }
 
+inline unsigned char BYTE(uint16_t x, int n)
+{
+    return static_cast<unsigned char>((x >> (8 * n)) & 0xFF);
+}
+
+// Special functions
+bool PktDef::LooksLikeDriveBody() const
+{
+    if (bodySize != sizeof(DriveBody)) return false;
+
+    const DriveBody* d = reinterpret_cast<const DriveBody*>(packet.Data);
+
+    bool validDirection = (d->Direction >= 1 && d->Direction <= 4);
+    bool validPower = (d->Power >= 80 && d->Power <= 100);
+
+    return validDirection && validPower;
+}
+
+bool PktDef::LooksLikeTurnBody() const
+{
+    if (bodySize != sizeof(TurnBody)) return false;
+
+    const TurnBody* t = reinterpret_cast<const TurnBody*>(packet.Data);
+
+    bool validTurnDir = (t->Direction == LEFT || t->Direction == RIGHT);
+
+    return validTurnDir;
+}
+
+bool PktDef::LooksLikeTelemetryBody() const
+{
+    if (bodySize != sizeof(TelemetryBody)) return false;
+
+    const TelemetryBody* t = reinterpret_cast<const TelemetryBody*>(packet.Data);
+
+    if (t->Heading > 359) return false;
+    if (t->LastCmdPower > 100) return false;
+
+    return true;
+}
+
+
+// Constructors and Destructors
 PktDef::PktDef()
 {
-    // Initialize header
+    // Header defaults (spec: all header info = 0)
+    packet.header.PktCount = 0;
+    packet.header.Flags = 0;
+    packet.header.Length = HEADERSIZE + 1;   // header + CRC only
+
+    // Body defaults
+    packet.bodyType = NONE;
+    packet.Data = nullptr;
+    packet.message = nullptr;
+    packet.dataSize = 0;
+
+    // CRC default (spec: CRC = 0)
+    packet.CRC = 0;
+
+    // Raw buffer not allocated yet
+    RawBuffer = nullptr;
+
+    // Internal state
+    bodySize = 0;
+    validPacket = false;
+}
+
+PktDef::PktDef(char* raw)
+{
+    // ---------------------------------------------------------
+    // 0. Initialize safe state
+    // ---------------------------------------------------------
+    bodySize = 0;
     packet.header.PktCount = 0;
     packet.header.Flags = 0;
     packet.header.Length = 0;
 
-    // Initialize body
+    packet.bodyType = BodyType::NONE;
     packet.Data = nullptr;
-    bodySize = 0;
-
-    // Initialize CRC
+    packet.message = nullptr;
+    packet.dataSize = 0;
     packet.CRC = 0;
-
-    // Initialize raw buffer
     RawBuffer = nullptr;
+    validPacket = false;
 
+    if (raw == nullptr)
+        return;
+
+    // -----------------------------------------------------------------
+    // 1. Parse header (first 4 bytes)
+    // -----------------------------------------------------------------
+    packet.header.PktCount = (static_cast<unsigned char>(raw[0]) << 8) | (static_cast<unsigned char>(raw[1]));
+    packet.header.Flags = static_cast<unsigned char>(raw[2]);
+    packet.header.Length = static_cast<unsigned char>(raw[3]);
+
+    // -----------------------------------------------------------------
+    // 2. Compute body size
+    // -----------------------------------------------------------------
+    int totalLength = packet.header.Length;
+    bodySize = totalLength - HEADERSIZE - 1;   // minus CRC
+
+    if (bodySize < 0)
+        return; // invalid packet
+
+    packet.dataSize = bodySize;
+
+    // -----------------------------------------------------------------
+    // 3. Copy raw body bytes
+    // -----------------------------------------------------------------
+    if (bodySize > 0)
+    {
+        packet.Data = new char[bodySize];
+        memcpy(packet.Data, raw + HEADERSIZE, bodySize);
+    }
+
+    // -----------------------------------------------------------------
+    // 4. Read CRC (last byte)
+    // -----------------------------------------------------------------
+    packet.CRC = static_cast<unsigned char>(raw[HEADERSIZE + bodySize]);
+
+    // -----------------------------------------------------------------
+    // 5. Copy full raw buffer for CRC checking
+    // -----------------------------------------------------------------
+    RawBuffer = new char[packet.header.Length];
+    memcpy(RawBuffer, raw, packet.header.Length);
+
+    // -----------------------------------------------------------------
+    // 6. Classify packet
+    // -----------------------------------------------------------------
+    PacketClass cls = ClassifyPacket();
+
+    // -----------------------------------------------------------------
+    // 7. Populate bodyType, body, and message based on classification
+    // -----------------------------------------------------------------
+    switch (cls)
+    {
+    case PacketClass::DriveCommand:
+        packet.bodyType = DRIVE_BODY;
+        if (packet.Data && packet.dataSize >= static_cast<int>(sizeof(DriveBody)))
+            memcpy(&packet.body.drive, packet.Data, sizeof(DriveBody));
+        break;
+
+    case PacketClass::TurnCommand:
+        packet.bodyType = TURN_BODY;
+        if (packet.Data && packet.dataSize >= static_cast<int>(sizeof(TurnBody)))
+            memcpy(&packet.body.turn, packet.Data, sizeof(TurnBody));
+        break;
+
+    case PacketClass::TelemetryResponse:
+        packet.bodyType = TELEMETRY_BODY;
+        if (packet.Data && packet.dataSize >= static_cast<int>(sizeof(TelemetryBody)))
+            memcpy(&packet.body.telemetry, packet.Data, sizeof(TelemetryBody));
+        break;
+
+    case PacketClass::SleepCommand:
+    case PacketClass::TelemetryCommand:
+        packet.bodyType = NONE;
+        break;
+
+    case PacketClass::AckResponse:
+    case PacketClass::NAckResponse:
+        packet.bodyType = MESSAGE_BODY;
+
+        if (packet.dataSize > 0 && packet.Data != nullptr)
+        {
+            packet.message = new char[packet.dataSize + 1];
+            memcpy(packet.message, packet.Data, packet.dataSize);
+            packet.message[packet.dataSize] = '\0';
+        }
+        break;
+
+    default:
+        packet.bodyType = NONE;
+        break;
+    }
+
+    validPacket = true;
 }
 
 PktDef::~PktDef()
 {
-    // Free dynamically allocated body
-    if (packet.Data != nullptr)
-    {
-        delete[] packet.Data;
-        packet.Data = nullptr;
-    }
-
-    // Free raw buffer
+    // Free serialized buffer if allocated
     if (RawBuffer != nullptr)
     {
         delete[] RawBuffer;
         RawBuffer = nullptr;
     }
-}
 
-void PktDef::SetStatus(bool enable)
-{
-    if (enable)
-        packet.header.Flags |= STATUS_MASK;
-    else
-        packet.header.Flags &= ~STATUS_MASK;
-}
-
-void PktDef::SetDriveBody(const DriveBody& body)
-{
-    // 1. Validate direction
-    if (!IsValidDirection(body.Direction))
-    {
-        ClearBody();
-        validPacket = false;
-        return;
-    }
-
-    // 2. Validate power
-    if (body.Power < 80 || body.Power > 100)
-    {
-        ClearBody();
-        validPacket = false;
-        return;
-    }
-
-    // 3. Normal processing
-    char temp[3];
-    temp[0] = body.Direction;
-    temp[1] = body.Duration;
-    temp[2] = body.Power;
-
-    SetBodyData(temp, 3);
-}
-
-
-void PktDef::ClearBody()
-{
+    // Free raw data buffer if allocated
     if (packet.Data != nullptr)
     {
         delete[] packet.Data;
         packet.Data = nullptr;
     }
 
-    bodySize = 0;
-    packet.header.Length = HEADERSIZE + 1;
+    // Free message body if allocated
+    if (packet.message != nullptr)
+    {
+        delete[] packet.message;
+        packet.message = nullptr;
+    }
+}
+
+// Packet Generation
+char* PktDef::GenPacket()
+{
+    // ---------------------------------------------------------
+    // 0. Free old buffer
+    // ---------------------------------------------------------
+    if (RawBuffer != nullptr)
+    {
+        delete[] RawBuffer;
+        RawBuffer = nullptr;
+    }
+
+    // ---------------------------------------------------------
+    // 1. Compute body size based on bodyType
+    // ---------------------------------------------------------
+    switch (packet.bodyType)
+    {
+    case DRIVE_BODY:
+        bodySize = sizeof(DriveBody);
+        break;
+
+    case TURN_BODY:
+        bodySize = sizeof(TurnBody);
+        break;
+
+    case TELEMETRY_BODY:
+        bodySize = sizeof(TelemetryBody);
+        break;
+
+    case MESSAGE_BODY:
+        bodySize = packet.dataSize;   // message length
+        break;
+
+    case NONE:
+    default:
+        bodySize = 0;
+        break;
+    }
+
+    packet.dataSize = bodySize;
+
+    // ---------------------------------------------------------
+    // 2. Compute total packet length
+    // ---------------------------------------------------------
+    packet.header.Length = HEADERSIZE + bodySize + 1; // + CRC
+
+    // ---------------------------------------------------------
+    // 3. Allocate RawBuffer
+    // ---------------------------------------------------------
+    RawBuffer = new char[packet.header.Length];
+    int index = 0;
+
+    // ---------------------------------------------------------
+    // 4. Write Header
+    // ---------------------------------------------------------
+    RawBuffer[index++] = static_cast<char>(BYTE(packet.header.PktCount, 1)); // high byte
+    RawBuffer[index++] = static_cast<char>(BYTE(packet.header.PktCount, 0)); // low byte
+    RawBuffer[index++] = static_cast<char>(packet.header.Flags);
+    RawBuffer[index++] = static_cast<char>(packet.header.Length);
+
+    // ---------------------------------------------------------
+    // 5. Write Body
+    // ---------------------------------------------------------
+    if (packet.bodyType == DRIVE_BODY)
+    {
+        RawBuffer[index++] = packet.body.drive.Direction;
+        RawBuffer[index++] = packet.body.drive.Duration;
+        RawBuffer[index++] = packet.body.drive.Power;
+    }
+    else if (packet.bodyType == TURN_BODY)
+    {
+        RawBuffer[index++] = packet.body.turn.Direction;
+        RawBuffer[index++] = static_cast<char>(packet.body.turn.Duration & 0xFF);
+        RawBuffer[index++] = static_cast<char>((packet.body.turn.Duration >> 8) & 0xFF);
+    }
+    else if (packet.bodyType == TELEMETRY_BODY)
+    {
+        memcpy(RawBuffer + index, &packet.body.telemetry, sizeof(TelemetryBody));
+        index += sizeof(TelemetryBody);
+    }
+    else if (packet.bodyType == MESSAGE_BODY)
+    {
+        if (packet.message != nullptr && packet.dataSize > 0)
+        {
+            memcpy(RawBuffer + index, packet.message, packet.dataSize);
+            index += packet.dataSize;
+        }
+    }
+    // NONE ? write nothing
+
+    // ---------------------------------------------------------
+    // 6. Compute CRC
+    // ---------------------------------------------------------
+    CalcCRC();
+
+    // ---------------------------------------------------------
+    // 7. Write CRC
+    // ---------------------------------------------------------
+    RawBuffer[index] = static_cast<char>(packet.CRC);
+
+    validPacket = true;
+    return RawBuffer;
+}
+
+// Classifiers and Validators
+bool PktDef::IsValidDirection(Direction dir) const
+{
+    return (dir == FORWARD ||
+        dir == BACKWARD ||
+        dir == LEFT ||
+        dir == RIGHT);
+}
+
+PacketClass PktDef::ClassifyPacket() const
+{
+    FlagUnion fu;
+    fu.byte = packet.header.Flags;
+
+    int body_size = packet.dataSize;
+
+    // ---------------------------------------------------------
+    // OUTGOING CLASSIFICATION (packet.Data == nullptr)
+    // ---------------------------------------------------------
+    if (packet.Data == nullptr)
+    {
+        // Basic sanity
+        if (packet.header.Length < HEADERSIZE + 1)
+            return PacketClass::Invalid;
+
+        // Commands with no body
+        if (packet.bodyType == NONE)
+        {
+            if (fu.bits.Ack == 1)
+                return PacketClass::AckResponse;
+
+            if (fu.bits.Sleep == 1 && fu.bits.Ack == 0)
+                return PacketClass::SleepCommand;
+
+            if (fu.bits.Status == 1 && fu.bits.Ack == 0)
+                return PacketClass::TelemetryCommand;
+
+            if (fu.bits.Ack == 0 && (fu.bits.Drive || fu.bits.Status || fu.bits.Sleep))
+                return PacketClass::NAckResponse;
+
+            return PacketClass::Invalid;
+        }
+
+        // Telemetry response
+        if (fu.bits.Status == 1 && fu.bits.Ack == 0 && LooksLikeTelemetryBody())
+            return PacketClass::TelemetryResponse;
+
+        // Drive / Turn
+        if (fu.bits.Drive == 1 && fu.bits.Ack == 0)
+        {
+            if (packet.bodyType == DRIVE_BODY)
+                return PacketClass::DriveCommand;
+
+            if (packet.bodyType == TURN_BODY)
+                return PacketClass::TurnCommand;
+
+            return PacketClass::NAckResponse;
+        }
+
+        // ACK/NACK with message
+        if (packet.bodyType == MESSAGE_BODY)
+        {
+            return (fu.bits.Ack == 1)
+                ? PacketClass::AckResponse
+                : PacketClass::NAckResponse;
+        }
+
+        return PacketClass::Invalid;
+    }
+
+    // ---------------------------------------------------------
+    // INCOMING CLASSIFICATION (raw Data available)
+    // ---------------------------------------------------------
+
+    // 1. Basic sanity
+    if (packet.header.Length < HEADERSIZE + 1)
+        return PacketClass::Invalid;
+
+    if (body_size < 0)
+        return PacketClass::Invalid;
+
+    // 2. Commands with NO BODY
+    if (body_size == 0)
+    {
+        if (fu.bits.Ack == 1)
+            return PacketClass::AckResponse;
+
+        if (fu.bits.Sleep == 1 && fu.bits.Ack == 0)
+            return PacketClass::SleepCommand;
+
+        if (fu.bits.Status == 1 && fu.bits.Ack == 0)
+            return PacketClass::TelemetryCommand;
+
+        if (fu.bits.Ack == 0 && (fu.bits.Drive || fu.bits.Status || fu.bits.Sleep))
+            return PacketClass::NAckResponse;
+
+        return PacketClass::Invalid;
+    }
+
+    // 3. Telemetry Response
+    if (fu.bits.Status == 1 && fu.bits.Ack == 0)
+    {
+        if (LooksLikeTelemetryBody())
+            return PacketClass::TelemetryResponse;
+
+        return PacketClass::NAckResponse;
+    }
+
+    // 4. Drive / Turn Commands
+    if (fu.bits.Drive == 1 && fu.bits.Ack == 0)
+    {
+        if (LooksLikeDriveBody())
+            return PacketClass::DriveCommand;
+
+        if (LooksLikeTurnBody())
+            return PacketClass::TurnCommand;
+
+        return PacketClass::NAckResponse;
+    }
+
+    // 5. ACK
+    if (fu.bits.Ack == 1)
+        return PacketClass::AckResponse;
+
+    // 6. Fallback: NACK with message
+    return PacketClass::NAckResponse;
+}
+
+
+bool PktDef::IsDriveCommand() const {
+    return ClassifyPacket() == PacketClass::DriveCommand;
+}
+
+bool PktDef::IsTurnCommand() const {
+    return ClassifyPacket() == PacketClass::TurnCommand;
+}
+
+bool PktDef::IsSleepCommand() const {
+    return ClassifyPacket() == PacketClass::SleepCommand;
+}
+
+bool PktDef::IsTelemetryCommand() const {
+    return ClassifyPacket() == PacketClass::TelemetryCommand;
+}
+
+bool PktDef::IsAckResponse() const {
+    return ClassifyPacket() == PacketClass::AckResponse;
+}
+
+bool PktDef::IsNAckResponse() const {
+    return ClassifyPacket() == PacketClass::NAckResponse;
+}
+
+bool PktDef::IsTelemetryResponse() const {
+    return ClassifyPacket() == PacketClass::TelemetryResponse;
 }
 
 bool PktDef::IsValid() const
 {
-    return validPacket;
+    if (!validPacket)
+        return false;
+
+    if (RawBuffer == nullptr)
+        return false;
+
+    if (!CheckCRC(RawBuffer, packet.header.Length))
+        return false;
+
+    if (packet.header.Length != HEADERSIZE + bodySize + 1)
+        return false;
+
+    FlagUnion flags{};
+    flags.byte = packet.header.Flags;
+
+    int cmdCount = flags.bits.Drive + flags.bits.Status + flags.bits.Sleep;
+    if (cmdCount > 1)
+        return false;
+
+    PacketClass cls = ClassifyPacket();
+
+    // Commands cannot have Ack=1
+    if ((cls == PacketClass::DriveCommand ||
+        cls == PacketClass::TurnCommand ||
+        cls == PacketClass::SleepCommand ||
+        cls == PacketClass::TelemetryCommand) &&
+        flags.bits.Ack == 1)
+    {
+        return false;
+    }
+
+    switch (cls)
+    {
+    case PacketClass::DriveCommand:
+        if (!LooksLikeDriveBody())
+            return false;
+        return true;
+
+    case PacketClass::TurnCommand:
+        if (!LooksLikeTurnBody())
+            return false;
+        return true;
+
+    case PacketClass::SleepCommand:
+    case PacketClass::TelemetryCommand:
+        return (bodySize == 0);
+
+    case PacketClass::TelemetryResponse:
+        if (!LooksLikeTelemetryBody())
+            return false;
+        return true;
+
+    case PacketClass::AckResponse:
+    case PacketClass::NAckResponse:
+        // ACK/NACK must NOT contain structured bodies
+        if (LooksLikeDriveBody() ||
+            LooksLikeTurnBody() ||
+            LooksLikeTelemetryBody())
+        {
+            return false;
+        }
+        return true;
+
+    default:
+        return false;
+    }
 }
 
-bool PktDef::IsValidDirection(unsigned char dir) const
+
+void PktDef::CalcCRC()
 {
-    return (dir == FORWARD || dir == BACKWARD ||
-        dir == LEFT || dir == RIGHT);
+    if (RawBuffer == nullptr)
+        return;
+
+    int crc = 0;
+
+    // Count bits in all bytes except the CRC byte
+    for (int i = 0; i < packet.header.Length - 1; i++)
+    {
+        crc += CountBits(static_cast<unsigned char>(RawBuffer[i]));
+    }
+
+    packet.CRC = static_cast<unsigned char>(crc);
+}
+
+bool PktDef::CheckCRC(char* buffer, int size) const
+{
+    if (buffer == nullptr || size <= 1)
+        return false;
+
+    int crc = 0;
+
+    // Count bits in all bytes except the last (CRC)
+    for (int i = 0; i < size - 1; i++)
+    {
+        crc += CountBits(static_cast<unsigned char>(buffer[i]));
+    }
+
+    unsigned char expected = static_cast<unsigned char>(crc);
+    unsigned char actual = static_cast<unsigned char>(buffer[size - 1]);
+
+    return expected == actual;
+}
+
+// Internal Helper
+void PktDef::ClearBody()
+{
+    // Clear fixed body
+    memset(&packet.body, 0, sizeof(packet.body));
+
+    // Clear variable body (raw data)
+    if (packet.Data != nullptr)
+    {
+        delete[] packet.Data;
+        packet.Data = nullptr;
+    }
+
+    // Clear message body
+    if (packet.message != nullptr)
+    {
+        delete[] packet.message;
+        packet.message = nullptr;
+    }
+
+    packet.dataSize = 0;
+    packet.bodyType = NONE;
+    bodySize = 0;
+}
+
+// Setters
+void PktDef::SetCmd(CmdType cmd)
+{
+    FlagUnion flags{};
+    flags.byte = packet.header.Flags;
+
+    // Clear command bits
+    flags.bits.Drive = 0;
+    flags.bits.Status = 0;
+    flags.bits.Sleep = 0;
+
+    // Ack must be cleared for commands
+    flags.bits.Ack = 0;
+
+    switch (cmd)
+    {
+    case DRIVE:
+        flags.bits.Drive = 1;
+        break;
+
+    case SLEEP:
+        flags.bits.Sleep = 1;
+        break;
+
+    case RESPONSE:   // Telemetry Request
+        flags.bits.Status = 1;
+        break;
+    }
+
+    packet.header.Flags = flags.byte;
+
+    // Reset body
+    ClearBody();
+}
+
+void PktDef::SetBodyData(char* data, int size)
+{
+    ClearBody();
+
+    if (data == nullptr || size <= 0)
+        return;
+
+    packet.message = new char[size + 1];
+    memcpy(packet.message, data, size);
+    packet.message[size] = '\0';
+
+    packet.dataSize = size;
+    packet.bodyType = MESSAGE_BODY;
+    bodySize = size;
+}
+
+void PktDef::SetPktCount(int count)
+{
+    packet.header.PktCount = static_cast<unsigned short>(count);
+}
+
+void PktDef::SetStatus(bool enable)
+{
+    FlagUnion flags{};
+    flags.byte = packet.header.Flags;
+
+    flags.bits.Status = enable ? 1 : 0;
+
+    packet.header.Flags = flags.byte;
+}
+
+void PktDef::SetDriveBody(const DriveBody& body)
+{
+    ClearBody();
+    SetCmd(DRIVE);
+    packet.body.drive = body;
+    packet.bodyType = DRIVE_BODY;
+    bodySize = sizeof(DriveBody);
+    packet.dataSize = bodySize;
 }
 
 void PktDef::SetTurnBody(const TurnBody& body)
 {
-    // Validate direction: must be LEFT or RIGHT
-    if (body.Direction != LEFT && body.Direction != RIGHT)
+    ClearBody();
+    SetCmd(DRIVE);
+    packet.body.turn = body;
+    packet.bodyType = TURN_BODY;
+    bodySize = sizeof(TurnBody);
+    packet.dataSize = bodySize;
+}
+
+void PktDef::SetAck(bool enable)
+{
+    FlagUnion flags{};
+    flags.byte = packet.header.Flags;
+    flags.bits.Ack = enable ? 1 : 0;
+    packet.header.Flags = flags.byte;
+}
+
+void PktDef::SetTelemetryBody(const TelemetryBody& body)
+{
+    ClearBody();
+
+    packet.body.telemetry = body;
+    packet.bodyType = TELEMETRY_BODY;
+    bodySize = sizeof(TelemetryBody);
+    packet.dataSize = bodySize;
+}
+
+//Getters
+CmdType PktDef::GetCmd() const
+{
+    FlagUnion flags{};
+    flags.byte = packet.header.Flags;
+
+    if (flags.bits.Drive)  return DRIVE;
+    if (flags.bits.Sleep)  return SLEEP;
+    return RESPONSE; // Status bit
+}
+
+bool PktDef::GetAck() const
+{
+    FlagUnion flags{};
+    flags.byte = packet.header.Flags;
+    return flags.bits.Ack == 1;
+}
+
+int PktDef::GetLength() const
+{
+    return packet.header.Length;
+}
+
+char* PktDef::GetBodyData(int& size) const
+{
+    if (packet.bodyType == MESSAGE_BODY)
     {
-        ClearBody();
-        validPacket = false;
-        return;
+        size = packet.dataSize;
+        return packet.message;
     }
 
-    // Turn commands always use 100% power 
-    // TurnBody is exactly 3 bytes: Direction + Duration(2 bytes)
-    char temp[3];
-    temp[0] = body.Direction;
-    temp[1] = body.Duration & 0xFF;
-    temp[2] = (body.Duration >> 8) & 0xFF;
+    size = 0;
+    return nullptr;
+}
 
-    SetBodyData(temp, 3);
+int PktDef::GetPktCount() const
+{
+    return packet.header.PktCount;
 }
 
 unsigned char PktDef::GetFlags() const
@@ -141,408 +764,22 @@ int PktDef::GetBodySize() const
     return bodySize;
 }
 
-
 DriveBody PktDef::GetDriveBody() const
 {
-    DriveBody b{ 0,0,0 };
-
-    if (bodySize == 3)
-    {
-        b.Direction = packet.Data[0];
-        b.Duration = packet.Data[1];
-        b.Power = packet.Data[2];
-    }
-
-    return b;
+    return packet.body.drive;
 }
-
 
 TurnBody PktDef::GetTurnBody() const
 {
-    TurnBody b{ 0,0 };
-
-    if (bodySize == 3)
-    {
-        b.Direction = packet.Data[0];
-        b.Duration = (unsigned short)((unsigned char)packet.Data[1] |
-            ((unsigned char)packet.Data[2] << 8));
-    }
-
-    return b;
+    return packet.body.turn;
 }
-
 
 TelemetryBody PktDef::GetTelemetry() const
 {
-    TelemetryBody t{ 0 };
-
-    if (bodySize == 11)
-    {
-        const unsigned char* d = (unsigned char*)packet.Data;
-
-        t.LastPktCounter = d[0] | (d[1] << 8);
-        t.CurrentGrade = d[2] | (d[3] << 8);
-        t.HitCount = d[4] | (d[5] << 8);
-        t.Heading = d[6] | (d[7] << 8);
-        t.LastCmd = d[8];
-        t.LastCmdValue = d[9];
-        t.LastCmdPower = d[10];
-    }
-
-    return t;
+    return packet.body.telemetry;
 }
-
 
 char* PktDef::GetRawBuffer() const
 {
     return RawBuffer;
-}
-
-
-bool PktDef::IsDriveCommand() const
-{
-    return (packet.header.Flags & DRIVE_MASK) != 0;
-}
-
-bool PktDef::IsTurnCommand() const
-{
-    if (!IsDriveCommand()) return false;
-
-    if (bodySize == 3)
-    {
-        unsigned char dir = packet.Data[0];
-        return (dir == LEFT || dir == RIGHT);
-    }
-
-    return false;
-}
-
-// Situation #1: Telemetry Request (Computer → Robot)
-// Valid if:
-//   - Status = 1
-//   - Ack = 0 (commands must NOT set ACK)
-//   - Drive = 0
-//   - Sleep = 0
-bool PktDef::IsTelemetryRequest() const
-{
-    bool isStatus = (packet.header.Flags & STATUS_MASK);
-    bool hasAck = (packet.header.Flags & ACK_MASK);
-    bool isDrive = (packet.header.Flags & DRIVE_MASK);
-    bool isSleep = (packet.header.Flags & SLEEP_MASK);
-
-    return isStatus && !hasAck && !isDrive && !isSleep;
-}
-
-// Situation #2: ACK Response (Robot → Computer)
-// Valid if:
-//   - Status = 1
-//   - Ack = 1
-bool PktDef::IsAckResponse() const
-{
-    bool isStatus = (packet.header.Flags & STATUS_MASK);
-    bool hasAck = (packet.header.Flags & ACK_MASK);
-
-    return isStatus && hasAck;
-}
-
-
-// Situation #3: Telemetry Response (Robot → Computer)
-// Telemetry must have:
-//   - Status = 1
-//   - Body = 11 bytes (telemetry structure)
-//
-// ACK handling depends on EnforceAckForTelemetry:
-//   - If true:  ACK must be 0
-//   - If false: ACK is ignored (protocol does not specify)
-bool PktDef::IsTelemetryResponse() const
-{
-    bool isStatus = (packet.header.Flags & STATUS_MASK) != 0;
-    bool hasAck = (packet.header.Flags & ACK_MASK) != 0;
-
-    // Telemetry body is always 11 bytes
-    bool correctBody = (bodySize == 11);
-
-    if (!isStatus || !correctBody)
-        return false;
-
-    // Strict mode: ACK must be 0
-    if (ENFORCE_TELEMETRY_ACK_ZERO)
-        return !hasAck;
-
-    // Relaxed mode: ACK ignored
-    return true;
-}
-
-
-void PktDef::SetPktCount(int count)
-{
-    packet.header.PktCount = static_cast<unsigned short>(count);
-}
-
-// Get packet count
-int PktDef::GetPktCount() const
-{
-    return packet.header.PktCount;
-}
-
-void PktDef::SetCmd(CmdType cmd)
-{
-    packet.header.Flags &= 0xF0; // keep only upper 4 bits
-
-    // Clear only the main command bits: Drive, Status, Sleep
-    packet.header.Flags &= ~(DRIVE_MASK | STATUS_MASK | SLEEP_MASK);
-
-    switch (cmd)
-    {
-    case DRIVE:
-        packet.header.Flags = packet.header.Flags | DRIVE_MASK;
-
-        // If body is missing, mark invalid but allow user to set body later
-        if (bodySize == 0)
-            validPacket = false;
-
-        break;
-
-    case SLEEP:
-        packet.header.Flags = packet.header.Flags | SLEEP_MASK;
-        ClearBody(); // Sleep must have no body
-        break;
-
-
-    case RESPONSE:
-        packet.header.Flags = packet.header.Flags | STATUS_MASK;
-        // If not telemetry, clear body
-        if (!IsTelemetryResponse())
-            ClearBody();
-        break;
-
-
-    default:
-        break;
-    }
-}
-
-void PktDef::SetAck(bool enable)
-{
-    if (enable)
-    {
-        // Ack must be paired with a command flag
-        if (!(packet.header.Flags & (DRIVE_MASK | SLEEP_MASK | STATUS_MASK)))
-        {
-            // Default to RESPONSE
-            packet.header.Flags |= STATUS_MASK;
-        }
-
-        packet.header.Flags |= ACK_MASK;
-    }
-    else
-    {
-        packet.header.Flags &= ~ACK_MASK;
-    }
-}
-
-
-void PktDef::SetBodyData(char* data, int size)
-{
-    // Delete old body data if it exists
-    if (packet.Data != nullptr)
-    {
-        delete[] packet.Data;
-        packet.Data = nullptr;
-    }
-
-    // Handle empty or invalid body
-    if (data == nullptr || size <= 0)
-    {
-        bodySize = 0;
-        packet.header.Length = HEADERSIZE + 1;   // header + CRC
-        return;
-    }
-
-    // Allocate new memory
-    packet.Data = new char[size];
-
-    // Copy incoming data into packet body
-    memcpy(packet.Data, data, size);
-
-    // Store body size
-    bodySize = size;
-
-    // Update packet length
-    packet.header.Length = HEADERSIZE + bodySize + 1;   
-}
-
-CmdType PktDef::GetCmd() const
-{
-    if ((packet.header.Flags & DRIVE_MASK) != 0)
-    {
-        return DRIVE;
-    }
-    else if ((packet.header.Flags & SLEEP_MASK) != 0)
-    {
-        return SLEEP;
-    }
-    else
-    {
-        return RESPONSE;
-    }
-}
-
-bool PktDef::CheckCRC(char* buffer, int size)
-{
-    if (buffer == nullptr || size <= 1)
-    {
-        return false;
-    }
-
-    int bitCount = 0;
-
-    // Do not include the last byte (used by CRC itself)
-    for (int i = 0; i < size - 1; i++)
-    {
-        bitCount += CountOnBitsInByte((unsigned char)buffer[i]);
-    }
-
-    unsigned char calculatedCRC = (unsigned char)(bitCount % 256);
-    unsigned char packetCRC = (unsigned char)buffer[size - 1];
-    
-    return calculatedCRC == packetCRC;
-}
-
-void PktDef::CalcCRC()
-{
-    int bitCount = 0;
-
-    // Count bits in PktCount (2 bytes)
-    unsigned short pktCount = packet.header.PktCount;
-    unsigned char lowByte = pktCount & 0x00FF;
-    unsigned char highByte = (pktCount >> 8) & 0x00FF;
-
-    bitCount += CountOnBitsInByte(lowByte);
-    bitCount += CountOnBitsInByte(highByte);
-
-    // Count bits in Flags (1 byte)
-    bitCount += CountOnBitsInByte(packet.header.Flags);
-
-    // Count bits in Length (1 byte)
-    bitCount += CountOnBitsInByte(packet.header.Length);
-
-    // Count bits in body data (bodySize bytes)
-    for (int i = 0; i < bodySize; i++)
-    {
-        bitCount += CountOnBitsInByte((unsigned char)packet.Data[i]);
-    }
-    
-    // Store result as 1 byte CRC
-    packet.CRC = (unsigned char)(bitCount % 256);
-}
-
-char* PktDef::GenPacket()
-{
-    // Enforce: Drive commands must have a body
-    if ((packet.header.Flags & DRIVE_MASK) && bodySize == 0)
-    {
-        validPacket = false;
-        // Still generate a minimal packet, but mark invalid
-        packet.header.Length = HEADERSIZE + 1;
-        CalcCRC();
-        return RawBuffer; // or return nullptr if you prefer
-    }
-
-    packet.header.Length = HEADERSIZE + bodySize + 1;
-
-    CalcCRC();
-
-    if (RawBuffer != nullptr)
-    {
-        delete[] RawBuffer;
-        RawBuffer = nullptr;
-    }
-
-    RawBuffer = new char[packet.header.Length];
-
-    // Header 
-    RawBuffer[0] = static_cast<char>(packet.header.PktCount & ALL_RIGHT_BITS);
-    RawBuffer[1] = static_cast<char>((packet.header.PktCount >> 8) & ALL_RIGHT_BITS);
-    RawBuffer[2] = static_cast<char>(packet.header.Flags);
-    RawBuffer[3] = static_cast<char>(packet.header.Length);
-
-    // Body 
-    if (packet.Data != nullptr && bodySize > 0)
-    {
-        std::memcpy(RawBuffer + HEADERSIZE, packet.Data, bodySize);
-    }
-
-    // CRC
-    RawBuffer[packet.header.Length - 1] = packet.CRC;
-
-    return RawBuffer;
-}
-
-int PktDef::GetLength() const
-{
-    return packet.header.Length;
-}
-
-char* PktDef::GetBodyData() const
-{
-    return packet.Data;
-}
-
-bool PktDef::GetAck() const
-{
-    return (packet.header.Flags & ACK_MASK) != 0;
-}
-
-PktDef::PktDef(char* rawData) : RawBuffer(nullptr), bodySize(0)
-{
-    packet.header.PktCount = 0;
-    packet.header.Flags = 0;
-    packet.header.Length = 0;
-    packet.Data = nullptr;
-    packet.CRC = 0;
-    validPacket = true;
-
-    if (rawData == nullptr)
-    {
-        validPacket = false;
-        return;
-    }
-
-    // Read header fields (assumes caller provided at least 4 bytes)
-    unsigned char lowByte = static_cast<unsigned char>(rawData[0]);
-    unsigned char highByte = static_cast<unsigned char>(rawData[1]);
-
-    packet.header.PktCount =
-        static_cast<unsigned short>(lowByte) |
-        (static_cast<unsigned short>(highByte) << 8);
-
-    packet.header.Flags = static_cast<unsigned char>(rawData[2]);
-    packet.header.Length = static_cast<unsigned char>(rawData[3]);
-
-    // Validate minimum legal length
-    if (packet.header.Length < HEADERSIZE + 1)
-    {
-        validPacket = false;
-        return;
-    }
-
-    bodySize = packet.header.Length - HEADERSIZE - 1;
-
-    if (bodySize > 0)
-    {
-        packet.Data = new char[bodySize];
-        std::memcpy(packet.Data, rawData + HEADERSIZE, bodySize);
-    }
-
-    packet.CRC = rawData[packet.header.Length - 1];
-
-    // Validate CRC
-    if (!CheckCRC(rawData, packet.header.Length))
-    {
-        validPacket = false;
-    }
-
-    RawBuffer = new char[packet.header.Length];
-    std::memcpy(RawBuffer, rawData, packet.header.Length);
 }
