@@ -69,3 +69,6 @@ packages/
 
 ## Crash dumps
 *.dmp
+coil-app
+webserver/robot-gui
+webserver/crow_lib/
