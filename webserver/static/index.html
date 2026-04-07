@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Robot Command & Control</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: monospace; background: #1a1a2e; color: #eee; padding: 20px; }
+    h1 { text-align: center; color: #0ff; margin-bottom: 20px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 900px; margin: 0 auto; }
+    .panel { background: #16213e; border: 1px solid #0f3460; border-radius: 8px; padding: 16px; }
+    .panel h2 { color: #0ff; margin-bottom: 12px; font-size: 14px; text-transform: uppercase; }
+    label { display: block; font-size: 12px; color: #aaa; margin: 6px 0 2px; }
+    input { width: 100%; padding: 6px; background: #0a0a23; border: 1px solid #333; color: #eee; border-radius: 4px; font-family: monospace; }
+    button { padding: 10px 16px; border: none; border-radius: 4px; cursor: pointer; font-family: monospace; font-weight: bold; font-size: 13px; margin: 4px; }
+    .btn-connect { background: #0ff; color: #000; }
+    .btn-drive { background: #00c853; color: #000; }
+    .btn-sleep { background: #ff6d00; color: #000; }
+    .btn-telem { background: #2979ff; color: #fff; }
+    .controls { display: grid; grid-template-areas: ". fwd ." "left . right" ". back ."; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin: 10px 0; }
+    .controls button:nth-child(1) { grid-area: fwd; }
+    .controls button:nth-child(2) { grid-area: left; }
+    .controls button:nth-child(3) { grid-area: right; }
+    .controls button:nth-child(4) { grid-area: back; }
+    #status { padding: 8px; background: #0a0a23; border-radius: 4px; margin-top: 8px; min-height: 40px; font-size: 12px; color: #0f0; white-space: pre-wrap; word-wrap: break-word; }
+    #telemetry-data { font-size: 12px; }
+    #telemetry-data div { padding: 3px 0; border-bottom: 1px solid #222; }
+    #telemetry-data span { color: #0ff; float: right; }
+    #log { height: 200px; overflow-y: auto; background: #0a0a23; padding: 8px; border-radius: 4px; font-size: 11px; color: #888; }
+    .connected { color: #0f0; }
+    .disconnected { color: #f44; }
+    .full-width { grid-column: 1 / -1; }
+  </style>
+</head>
+<body>
+<h1>Robot Command & Control</h1>
+<div class="grid">
+  <div class="panel">
+    <h2>Connection</h2>
+    <label>Robot IP</label>
+    <input id="ip" type="text" value="10.172.41.150">
+    <label>Port</label>
+    <input id="port" type="number" value="29500">
+    <button class="btn-connect" onclick="doConnect()">Connect</button>
+    <span id="conn-status" class="disconnected">Disconnected</span>
+  </div>
+  <div class="panel">
+    <h2>Routing</h2>
+    <label>Target GUI IP</label>
+    <input id="route-ip" type="text" value="127.0.0.1">
+    <label>Target GUI Port</label>
+    <input id="route-port" type="number" value="8080">
+    <button class="btn-telem" onclick="enableRouting()">Enable Routing</button>
+    <button class="btn-sleep" onclick="disableRouting()">Direct Robot</button>
+    <div id="route-status" style="margin-top:8px;color:#aaa;font-size:12px;">Mode: direct</div>
+  </div>
+  <div class="panel">
+    <h2>Telemetry</h2>
+    <button class="btn-telem" onclick="requestTelemetry()">Request Telemetry</button>
+    <div id="telemetry-data" style="margin-top:10px;">
+      <div>Last Pkt Counter <span id="t-pkt">--</span></div>
+      <div>Current Grade <span id="t-grade">--</span></div>
+      <div>Hit Count <span id="t-hits">--</span></div>
+      <div>Heading <span id="t-heading">--</span></div>
+      <div>Last Cmd <span id="t-cmd">--</span></div>
+      <div>Last Cmd Value <span id="t-val">--</span></div>
+      <div>Last Cmd Power <span id="t-pwr">--</span></div>
+    </div>
+  </div>
+  <div class="panel">
+    <h2>Drive Controls</h2>
+    <label>Duration (seconds)</label>
+    <input id="duration" type="number" value="2" min="1" max="255">
+    <label>Power (80-100%)</label>
+    <input id="power" type="number" value="90" min="80" max="100">
+    <div class="controls">
+      <button class="btn-drive" onclick="drive(1)">Forward</button>
+      <button class="btn-drive" onclick="drive(4)">Left</button>
+      <button class="btn-drive" onclick="drive(3)">Right</button>
+      <button class="btn-drive" onclick="drive(2)">Backward</button>
+    </div>
+    <button class="btn-sleep" onclick="doSleep()">Sleep</button>
+  </div>
+  <div class="panel">
+    <h2>Last Response</h2>
+    <div id="status">Waiting for connection...</div>
+  </div>
+  <div class="panel full-width">
+    <h2>Packet Log</h2>
+    <div id="log"></div>
+  </div>
+</div>
+
+<script>
+function show(msg, isError) {
+  const el = document.getElementById('status');
+  el.textContent = typeof msg === 'string' ? msg : JSON.stringify(msg, null, 2);
+  el.style.color = isError ? '#f44' : '#0f0';
+}
+
+function updateTelemetry(t) {
+  if (!t) return;
+  document.getElementById('t-pkt').textContent = t.lastPktCounter ?? '--';
+  document.getElementById('t-grade').textContent = t.currentGrade ?? '--';
+  document.getElementById('t-hits').textContent = t.hitCount ?? '--';
+  document.getElementById('t-heading').textContent = t.heading ?? '--';
+  document.getElementById('t-cmd').textContent = t.lastCmd ?? '--';
+  document.getElementById('t-val').textContent = t.lastCmdValue ?? '--';
+  document.getElementById('t-pwr').textContent = t.lastCmdPower ?? '--';
+}
+
+async function doConnect() {
+  const ip = document.getElementById('ip').value;
+  const port = document.getElementById('port').value;
+  try {
+    const r = await fetch('/connect/' + ip + '/' + port, { method: 'POST' });
+    const j = await r.json();
+    if (j.error) { show(j.error, true); return; }
+    document.getElementById('conn-status').textContent = 'Connected';
+    document.getElementById('conn-status').className = 'connected';
+    show('Connected to ' + ip + ':' + port + ' via ' + (j.protocol || '').toUpperCase());
+    refreshLog();
+  } catch(e) { show(e.message, true); }
+}
+
+async function enableRouting() {
+  const targetIp = document.getElementById('route-ip').value;
+  const targetPort = parseInt(document.getElementById('route-port').value);
+  try {
+    const r = await fetch('/routing_table/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'route', targetIp, targetPort })
+    });
+    const j = await r.json();
+    if (j.error) { show(j.error, true); return; }
+    document.getElementById('route-status').textContent =
+      'Mode: route -> ' + j.targetIp + ':' + j.targetPort;
+    show(j);
+    refreshLog();
+  } catch(e) { show(e.message, true); }
+}
+
+async function disableRouting() {
+  try {
+    const r = await fetch('/routing_table/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'direct' })
+    });
+    const j = await r.json();
+    if (j.error) { show(j.error, true); return; }
+    document.getElementById('route-status').textContent = 'Mode: direct';
+    show(j);
+    refreshLog();
+  } catch(e) { show(e.message, true); }
+}
+
+async function drive(dir) {
+  const duration = parseInt(document.getElementById('duration').value);
+  const power = parseInt(document.getElementById('power').value);
+  const body = { command: 'drive', direction: dir, duration: duration, power: power };
+  try {
+    const r = await fetch('/telecommand/', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const j = await r.json();
+    if (j.error) { show(j.error, true); return; }
+    updateTelemetry(j.telemetry);
+    show(j);
+    refreshLog();
+  } catch(e) { show(e.message, true); }
+}
+
+async function doSleep() {
+  try {
+    const r = await fetch('/telecommand/', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'sleep' })
+    });
+    const j = await r.json();
+    if (j.error) { show(j.error, true); return; }
+    updateTelemetry(j.telemetry);
+    show(j);
+    refreshLog();
+  } catch(e) { show(e.message, true); }
+}
+
+async function requestTelemetry() {
+  try {
+    const r = await fetch('/telementry_request/');
+    const j = await r.json();
+    if (j.error) { show(j.error, true); return; }
+    updateTelemetry(j.telemetry);
+    show(j);
+    refreshLog();
+  } catch(e) { show(e.message, true); }
+}
+
+async function refreshLog() {
+  try {
+    const r = await fetch('/log');
+    const j = await r.json();
+    const el = document.getElementById('log');
+    el.innerHTML = j.log.map(l => '<div>' + l + '</div>').join('');
+    el.scrollTop = el.scrollHeight;
+  } catch(e) {}
+}
+
+setInterval(refreshLog, 2000);
+</script>
+</body>
+</html>
+
