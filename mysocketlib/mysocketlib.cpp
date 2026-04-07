@@ -7,6 +7,27 @@
     int MySocket::s_winsockRefCount = 0;
 #endif
 
+namespace {
+#ifdef _WIN32
+    void SetReceiveTimeout(SocketHandle socketHandle, int timeoutMs)
+    {
+        if (socketHandle == INVALID_SOCK) return;
+        DWORD timeout = static_cast<DWORD>(timeoutMs);
+        setsockopt(socketHandle, SOL_SOCKET, SO_RCVTIMEO,
+                   reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+    }
+#else
+    void SetReceiveTimeout(SocketHandle, int timeoutMs)
+    {
+        if (socketHandle == INVALID_SOCK) return;
+        timeval tv{};
+        tv.tv_sec = timeoutMs / 1000;
+        tv.tv_usec = (timeoutMs % 1000) * 1000;
+        setsockopt(socketHandle, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
+#endif
+}
+
 // ===============================
 // Platform init/cleanup
 // ===============================
@@ -72,6 +93,7 @@ MySocket::MySocket(SocketType type, std::string ip, unsigned int port,
             ConnectionSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
             if (ConnectionSocket == INVALID_SOCK)
                 throw std::runtime_error("Failed to create UDP client socket");
+            SetReceiveTimeout(ConnectionSocket, 2000);
         }
     }
 }
@@ -110,6 +132,8 @@ void MySocket::SetupServer()
     if (WelcomeSocket == INVALID_SOCK)
         throw std::runtime_error("Failed to create TCP welcome socket");
 
+    SetReceiveTimeout(WelcomeSocket, 2000);
+
     if (bind(WelcomeSocket, reinterpret_cast<sockaddr*>(&SvrAddr), sizeof(SvrAddr)) == SOCKET_ERR)
         throw std::runtime_error("bind() failed on server");
 
@@ -122,6 +146,8 @@ void MySocket::SetupUDPServer()
     ConnectionSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (ConnectionSocket == INVALID_SOCK)
         throw std::runtime_error("Failed to create UDP server socket");
+
+    SetReceiveTimeout(ConnectionSocket, 2000);
 
     if (bind(ConnectionSocket, reinterpret_cast<sockaddr*>(&SvrAddr), sizeof(SvrAddr)) == SOCKET_ERR)
         throw std::runtime_error("bind() failed on UDP server");
@@ -141,6 +167,8 @@ void MySocket::ConnectTCP()
     ConnectionSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (ConnectionSocket == INVALID_SOCK)
         throw std::runtime_error("Failed to create TCP client socket");
+
+    SetReceiveTimeout(ConnectionSocket, 2000);
 
     if (connect(ConnectionSocket, reinterpret_cast<sockaddr*>(&SvrAddr),
                 sizeof(SvrAddr)) == SOCKET_ERR)
@@ -237,7 +265,14 @@ int MySocket::GetData(char* destBuffer)
 
         received = recv(ConnectionSocket, Buffer, MaxSize, 0);
         if (received == SOCKET_ERR)
+        {
+#ifdef _WIN32
+            int err = WSAGetLastError();
+            if (err == WSAETIMEDOUT)
+                throw std::runtime_error("recv() timed out");
+#endif
             throw std::runtime_error("recv() failed");
+        }
     }
     else
     {
@@ -246,7 +281,14 @@ int MySocket::GetData(char* destBuffer)
         received = recvfrom(ConnectionSocket, Buffer, MaxSize, 0,
                             reinterpret_cast<sockaddr*>(&fromAddr), &fromLen);
         if (received == SOCKET_ERR)
+        {
+#ifdef _WIN32
+            int err = WSAGetLastError();
+            if (err == WSAETIMEDOUT)
+                throw std::runtime_error("recvfrom() timed out");
+#endif
             throw std::runtime_error("recvfrom() failed");
+        }
     }
 
     if (received > 0)

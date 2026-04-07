@@ -1,10 +1,13 @@
 #include "crow_lib/include/crow.h"
+#include "crow_lib/include/crow.h"
 #include "../PktDefLib/PktDef.h"
 #include "../mysocketlib/MySocket.h"
 #include <mutex>
 #include <vector>
 #include <sstream>
 #include <ctime>
+#include <cctype>
+#include <fstream>
 
 // Global state
 static MySocket* robotSocket = nullptr;
@@ -21,7 +24,9 @@ static void Log(const std::string& entry)
     std::lock_guard<std::mutex> lk(logMtx);
     time_t now = time(nullptr);
     char ts[64];
-    strftime(ts, sizeof(ts), "%H:%M:%S", localtime(&now));
+    struct tm timeinfo;
+    localtime_s(&timeinfo, &now);
+    strftime(ts, sizeof(ts), "%H:%M:%S", &timeinfo);
     packetLog.push_back(std::string(ts) + " " + entry);
     if (packetLog.size() > 200) packetLog.erase(packetLog.begin());
 }
@@ -74,27 +79,24 @@ static crow::json::wvalue SendAndRecv(PktDef& pkt)
     res["length"] = resp.GetLength();
     res["flags"] = resp.GetFlags();
 
-    if (resp.IsTelemetryResponse()) {
-        TelemetryBody t = resp.GetTelemetry();
-        res["telemetry"]["lastPktCounter"] = t.LastPktCounter;
-        res["telemetry"]["currentGrade"] = t.CurrentGrade;
-        res["telemetry"]["hitCount"] = t.HitCount;
-        res["telemetry"]["heading"] = t.Heading;
-        res["telemetry"]["lastCmd"] = t.LastCmd;
-        res["telemetry"]["lastCmdValue"] = t.LastCmdValue;
-        res["telemetry"]["lastCmdPower"] = t.LastCmdPower;
-        Log("RX Telemetry: grade=" + std::to_string(t.CurrentGrade) +
-            " hits=" + std::to_string(t.HitCount) +
-            " heading=" + std::to_string(t.Heading));
-    } else {
-        int msgSize = 0;
-        char* msg = resp.GetBodyData(msgSize);
-        if (msg && msgSize > 0)
-            res["message"] = std::string(msg, msgSize);
+    // ALWAYS include telemetry data
+    TelemetryBody t = resp.GetTelemetry();
+    res["telemetry"]["lastPktCounter"] = t.LastPktCounter;
+    res["telemetry"]["currentGrade"] = t.CurrentGrade;
+    res["telemetry"]["hitCount"] = t.HitCount;
+    res["telemetry"]["heading"] = t.Heading;
+    res["telemetry"]["lastCmd"] = t.LastCmd;
+    res["telemetry"]["lastCmdValue"] = t.LastCmdValue;
+    res["telemetry"]["lastCmdPower"] = t.LastCmdPower;
 
-        Log("RX " + std::string(resp.GetAck() ? "ACK" : "NACK") +
-            " pkt#" + std::to_string(resp.GetPktCount()));
-    }
+    // Also include message if present
+    int msgSize = 0;
+    char* msg = resp.GetBodyData(msgSize);
+    if (msg && msgSize > 0)
+        res["message"] = std::string(msg, msgSize);
+
+    Log("RX " + std::string(resp.GetAck() ? "ACK" : "NACK") +
+        " pkt#" + std::to_string(resp.GetPktCount()));
 
     return res;
 }
@@ -103,19 +105,77 @@ int main()
 {
     crow::SimpleApp app;
 
-    // Serve GUI
+    // ============================================================
+    // ROOT ROUTE: / - Serve Command and Control GUI
+    // ============================================================
     CROW_ROUTE(app, "/")
     ([]() {
-        crow::response r;
-        r.set_static_file_info("static/index.html");
+        std::ifstream file("C:\\Users\\Jaden Mardini\\source\\repos\\coil-network6-main\\coil-network6-main\\webserver\\static\\index.html");
+        if (!file.is_open()) {
+            return crow::response(404, "File not found");
+        }
+        std::stringstream buffer;
+        buffer << file.rdbuf();
+        crow::response r(buffer.str());
+        r.set_header("Content-Type", "text/html; charset=utf-8");
+        r.set_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+        r.set_header("Pragma", "no-cache");
+        r.set_header("Expires", "0");
         return r;
     });
 
-    // Connect to robot/simulator
+    // ============================================================
+    // CONNECTION ROUTE: /connect/<string>/<int> - Connect to Robot
+    // Parameters: <string> = IP Address, <int> = Port Number
+    // Method: POST
+    // ============================================================
     CROW_ROUTE(app, "/connect/<string>/<int>").methods(crow::HTTPMethod::POST)
     ([](const std::string& ip, int port) {
         std::lock_guard<std::mutex> lk(socketMtx);
 
+        // Validate IP address format
+        if (ip.empty()) {
+            Log("Connection failed: Empty IP address");
+            return crow::json::wvalue({{"error", "IP address cannot be empty"}});
+        }
+
+        // Validate port number range
+        if (port <= 0 || port > 65535) {
+            Log("Connection failed: Invalid port " + std::to_string(port));
+            return crow::json::wvalue({{"error", "Port must be between 1 and 65535"}});
+        }
+
+        // Basic IP validation - check for basic format
+        int dotCount = 0;
+        bool hasValidOctets = true;
+        std::string octets[4];
+        int octetIndex = 0;
+
+        for (size_t i = 0; i < ip.length(); i++) {
+            if (ip[i] == '.') {
+                dotCount++;
+                octetIndex++;
+            } else if (!isdigit(ip[i])) {
+                hasValidOctets = false;
+                break;
+            } else {
+                if (octetIndex < 4) {
+                    octets[octetIndex] += ip[i];
+                }
+            }
+        }
+
+        // For IPv4: must have exactly 3 dots (4 octets)
+        // octetIndex should equal 3 (since we start at 0 and increment when we see dots)
+        if (dotCount != 3 || !hasValidOctets || octetIndex != 3) {
+            // Also allow "localhost" as special case
+            if (ip != "localhost" && ip != "127.0.0.1") {
+                Log("Connection failed: Invalid IP format: " + ip);
+                return crow::json::wvalue({{"error", "Invalid IP address format"}});
+            }
+        }
+
+        // Clean up old connection if exists
         if (robotSocket) {
             delete robotSocket;
             robotSocket = nullptr;
@@ -131,12 +191,17 @@ int main()
                                         {"ip", ip}, {"port", port}});
         } catch (std::exception& e) {
             Log("Connect failed: " + std::string(e.what()));
-            return crow::json::wvalue({{"error", std::string(e.what())}});
+            robotSocket = nullptr;
+            return crow::json::wvalue({{"error", "Connection failed: " + std::string(e.what())}});
         }
     });
 
-    // Telecommand (Drive / Sleep)
-    CROW_ROUTE(app, "/telecommand/").methods(crow::HTTPMethod::PUT)
+    // ============================================================
+    // TELECOMMAND ROUTE: /telecommand/ - Send Drive or Sleep Command
+    // Method: PUT
+    // Body: JSON with command details (drive/sleep)
+    // ============================================================
+    CROW_ROUTE(app, "/telecommand/").methods(crow::HTTPMethod::Put)
     ([](const crow::request& req) {
         auto body = crow::json::load(req.body);
         if (!body) return crow::json::wvalue({{"error", "Invalid JSON"}});
@@ -146,6 +211,7 @@ int main()
 
         if (cmd == "sleep") {
             pkt.SetCmd(SLEEP);
+            Log("Command: SLEEP");
         } else if (cmd == "drive") {
             int dir = body["direction"].i();
             int duration = body["duration"].i();
@@ -155,13 +221,19 @@ int main()
                 t.Direction = static_cast<unsigned char>(dir);
                 t.Duration = static_cast<unsigned short>(duration);
                 pkt.SetTurnBody(t);
-            } else {
+                Log("Command: DRIVE " + std::string(dir == LEFT ? "LEFT" : "RIGHT") + 
+                    " duration=" + std::to_string(duration));
+            } else if (dir == FORWARD || dir == BACKWARD) {
                 int power = body["power"].i();
                 DriveBody d{};
                 d.Direction = static_cast<unsigned char>(dir);
                 d.Duration = static_cast<unsigned char>(duration);
                 d.Power = static_cast<unsigned char>(power);
                 pkt.SetDriveBody(d);
+                Log("Command: DRIVE " + std::string(dir == FORWARD ? "FORWARD" : "BACKWARD") + 
+                    " duration=" + std::to_string(duration) + " power=" + std::to_string(power));
+            } else {
+                return crow::json::wvalue({{"error", "Invalid direction"}});
             }
         } else {
             return crow::json::wvalue({{"error", "Unknown command"}});
@@ -170,25 +242,38 @@ int main()
         return SendAndRecv(pkt);
     });
 
-    // Telemetry request
-    CROW_ROUTE(app, "/telementry_request/").methods(crow::HTTPMethod::GET)
+    // ============================================================
+    // TELEMETRY REQUEST ROUTE: /telementry_request/ - Get Robot Telemetry
+    // NOTE: Endpoint name has typo "telementry" per specification
+    // Method: GET
+    // ============================================================
+    CROW_ROUTE(app, "/telementry_request/").methods(crow::HTTPMethod::Get)
     ([]() {
         PktDef pkt;
         pkt.SetCmd(RESPONSE);
+        Log("Telemetry Request");
         return SendAndRecv(pkt);
     });
 
-    // Routing table
+    // ============================================================
+    // ROUTING TABLE ROUTE: /routing_table/ - Route Commands/Telemetry
+    // Method: POST
+    // ============================================================
     CROW_ROUTE(app, "/routing_table/").methods(crow::HTTPMethod::POST)
     ([](const crow::request& req) {
         auto body = crow::json::load(req.body);
         if (!body) return crow::json::wvalue({{"error", "Invalid JSON"}});
-        // TODO: forward to another instance
+
+        // TODO: Implement forwarding to another instance
+        Log("Routing table request received");
         return crow::json::wvalue({{"status", "routing not yet implemented"}});
     });
 
-    // Packet log endpoint
-    CROW_ROUTE(app, "/log").methods(crow::HTTPMethod::GET)
+    // ============================================================
+    // PACKET LOG ROUTE: /log - Get Communication Log
+    // Method: GET
+    // ============================================================
+    CROW_ROUTE(app, "/log").methods(crow::HTTPMethod::Get)
     ([]() {
         std::lock_guard<std::mutex> lk(logMtx);
         crow::json::wvalue res;
@@ -200,8 +285,16 @@ int main()
     });
 
     std::cout << "Starting Command & Control GUI on http://0.0.0.0:8080" << std::endl;
+    std::cout << "\nAvailable Routes:" << std::endl;
+    std::cout << "  GET    / - Serve Command and Control GUI" << std::endl;
+    std::cout << "  POST   /connect/<ip>/<port> - Connect to robot" << std::endl;
+    std::cout << "  PUT    /telecommand/ - Send drive/sleep command" << std::endl;
+    std::cout << "  GET    /telementry_request/ - Request telemetry" << std::endl;
+    std::cout << "  POST   /routing_table/ - Route commands to different instance" << std::endl;
+    std::cout << "  GET    /log - Get packet communication log" << std::endl;
+
     app.port(8080).multithreaded().run();
-    
+
     delete robotSocket;
     return 0;
 }
