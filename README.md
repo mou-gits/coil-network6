@@ -9,7 +9,7 @@ Visual Studio C++ solution that implements the robot packet protocol (`PktDef`),
 Open **`CoilProjectGroup6.sln`** in Visual Studio 2022 (or newer with MSVC v143).
 
 | Project | Type | Role |
-|--------|------|------|
+|--------|------|------|+
 | **PktDefLib** | Static library | Protocol: `PktDef`, headers, bodies, CRC, serialization |
 | **PktDefTests** | MSTest DLL | Unit tests for `PktDef` |
 | **mysocketlib** | Static library | TCP/UDP client & server: `MySocket` |
@@ -25,6 +25,28 @@ Source highlights:
 - `webserver/crow_lib/include/crow.h` — thin include that pulls in repo-root **`crow_all.h`** (single-header Crow)
 - `crow_all.h` — Crow amalgamated header (repo root)
 - `docs/project.md` — implementation / audit checklist derived from course documents (not a substitute for official PDFs)
+
+---
+
+##  System Architecture
+
+```mermaid
+flowchart TD
+    A["User (Browser GUI)"] --> B["Webserver (Crow REST API)"]
+    B --> C["PktDef - Packet Construction & Parsing"]
+    C --> D["MySocket - TCP/UDP Communication Layer"]
+    D --> E["Robot / Simulator"]
+    E -->|Telemetry & ACK Responses| B
+```
+---
+
+Overview
+The system follows a layered architecture for remotely controlling a robot over a network.
+1. The browser GUI allows users to send commands such as drive and sleep.
+2. The webserver handles HTTP requests and exposes REST endpoints.
+3. The PktDef module constructs and parses packets based on the defined application layer protocol.
+4. The MySocket layer manages communication using TCP or UDP.
+5. The robot/simulator executes commands and returns acknowledgments (ACK/NACK) or telemetry data.
 
 ---
 
