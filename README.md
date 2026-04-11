@@ -40,7 +40,8 @@ flowchart TD
 ```
 ---
 
-Overview
+## Overview
+
 The system follows a layered architecture for remotely controlling a robot over a network.
 1. The browser GUI allows users to send commands such as drive and sleep.
 2. The webserver handles HTTP requests and exposes REST endpoints.
